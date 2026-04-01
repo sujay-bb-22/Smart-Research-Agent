@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+
+.env
+
+db/
+chroma/
+*.sqlite3
+
+node_modules/
+.next/
+
+.DS_Store
