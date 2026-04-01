@@ -1,37 +1,64 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import os
+import shutil
+
+from ingest import get_pdf_chunks
 
 load_dotenv()
 
 app = FastAPI()
 
-# Load embeddings
+# 🔹 Global variables
+db = None
+retriever = None
+
+# 🔹 Ensure folders exist
+os.makedirs("data", exist_ok=True)
+os.makedirs("db", exist_ok=True)
+
+# 🔹 Load embeddings
 embeddings = HuggingFaceEmbeddings(
     model_name="all-MiniLM-L6-v2"
 )
 
-# Load DB
-db = Chroma(
-    persist_directory="db",
-    embedding_function=embeddings
-)
-
-retriever = db.as_retriever(search_kwargs={"k": 3})
-
-# Load LLM
+# 🔹 Load LLM
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
     model_name="llama-3.1-8b-instant"
 )
 
-# Request format
+# 🔹 Request format
 class QueryRequest(BaseModel):
     question: str
+
+
+# 🔹 Helper: Load DB safely
+def load_db():
+    global db, retriever
+
+    try:
+        db = Chroma(
+            persist_directory="db",
+            embedding_function=embeddings
+        )
+
+        retriever = db.as_retriever(search_kwargs={"k": 3})
+
+        print("✅ DB loaded successfully")
+
+    except Exception as e:
+        print("⚠️ DB not ready yet:", e)
+        db = None
+        retriever = None
+
+
+# 🔹 Load DB at startup
+load_db()
 
 
 @app.get("/")
@@ -39,38 +66,96 @@ def home():
     return {"message": "Smart Research Assistant API running"}
 
 
+# 🚀 Upload + ingest
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    try:
+        file_path = os.path.join("data", file.filename)
+
+        # 🔹 Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        print(f"📄 Saved file: {file.filename}")
+
+        # 🔹 Get chunks
+        docs = get_pdf_chunks(file_path)
+        
+        if docs is None:
+            return {"error": "Failed to process PDF"}
+
+        global db, retriever
+        
+        # 🔹 Clear old database dynamically 
+        if db is not None:
+            try:
+                db.delete_collection()
+            except Exception as e:
+                print("⚠️ Warning: Could not delete old collection cleanly:", e)
+
+        # 🔹 Create new database with new docs
+        db = Chroma.from_documents(docs, embeddings, persist_directory="db")
+        retriever = db.as_retriever(search_kwargs={"k": 3})
+
+        print("📦 Ingestion complete")
+
+        return {"message": "PDF uploaded and processed successfully"}
+
+    except Exception as e:
+        print("❌ Upload error:", e)
+        return {"error": str(e)}
+
+
 @app.post("/ask")
 def ask_question(request: QueryRequest):
-    query = request.question
+    global retriever
 
-    # Retrieve documents
-    docs = retriever.invoke(query)
+    # 🔴 FIX 1: Handle no DB
+    if retriever is None:
+        return {"error": "No document uploaded yet"}
 
-    context = "\n\n".join([doc.page_content for doc in docs])
+    query = request.question.strip()
 
-    prompt = f"""
-    Answer the question based ONLY on the context below.
+    # 🔴 FIX 2: Empty question check
+    if not query:
+        return {"error": "Question is empty"}
 
-    Context:
-    {context}
+    try:
+        # 🔹 Retrieve documents
+        docs = retriever.invoke(query)
 
-    Question:
-    {query}
+        if not docs:
+            return {"answer": "No relevant information found.", "sources": []}
 
-    Answer:
-    """
+        context = "\n\n".join([doc.page_content for doc in docs])
 
-    response = llm.invoke(prompt)
+        prompt = f"""
+        Answer the question based ONLY on the context below.
 
-    # Prepare sources
-    sources = []
-    for doc in docs:
-        sources.append({
-            "page": doc.metadata.get("page", "unknown"),
-            "content": doc.page_content[:200]
-        })
+        Context:
+        {context}
 
-    return {
-        "answer": response.content,
-        "sources": sources
-    }
+        Question:
+        {query}
+
+        Answer:
+        """
+
+        response = llm.invoke(prompt)
+
+        # 🔹 Prepare sources
+        sources = []
+        for doc in docs:
+            sources.append({
+                "page": doc.metadata.get("page", "unknown"),
+                "content": doc.page_content[:200]
+            })
+
+        return {
+            "answer": response.content,
+            "sources": sources
+        }
+
+    except Exception as e:
+        print("❌ Query error:", e)
+        return {"error": str(e)}
