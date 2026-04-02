@@ -48,10 +48,12 @@ class QueryRequest(BaseModel):
 def load_db():
     global db, retriever, embeddings
 
-    print("⏳ Downloading/Loading embeddings model...")
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    if embeddings is None:
+        print("🔄 Loading embeddings...")
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
     try:
+        print("🔄 Loading vector DB...")
         db = Chroma(
             persist_directory="db",
             embedding_function=embeddings
@@ -65,14 +67,6 @@ def load_db():
         print("⚠️ DB not ready yet:", e)
         db = None
         retriever = None
-
-
-# 🔹 Load DB at startup
-@app.on_event("startup")
-async def startup_event():
-    import asyncio
-    # Run in background to not block port binding
-    asyncio.create_task(asyncio.to_thread(load_db))
 
 
 @app.get("/")
@@ -98,7 +92,10 @@ async def upload_pdf(file: UploadFile = File(...)):
         if docs is None:
             return {"error": "Failed to process PDF"}
 
-        global db, retriever
+        global db, retriever, embeddings
+        
+        if embeddings is None:
+            load_db()
         
         # 🔹 Append or Create database
         if db is not None:
@@ -139,6 +136,9 @@ def clear_db():
 @app.post("/ask")
 def ask_question(request: QueryRequest):
     global retriever
+
+    if retriever is None:
+        load_db()
 
     # 🔴 FIX 1: Handle no DB
     if retriever is None:
