@@ -31,9 +31,7 @@ os.makedirs("data", exist_ok=True)
 os.makedirs("db", exist_ok=True)
 
 # 🔹 Load embeddings
-embeddings = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2"
-)
+embeddings = None
 
 # 🔹 Load LLM
 llm = ChatGroq(
@@ -48,7 +46,10 @@ class QueryRequest(BaseModel):
 
 # 🔹 Helper: Load DB safely
 def load_db():
-    global db, retriever
+    global db, retriever, embeddings
+
+    print("⏳ Downloading/Loading embeddings model...")
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
     try:
         db = Chroma(
@@ -67,7 +68,11 @@ def load_db():
 
 
 # 🔹 Load DB at startup
-load_db()
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    # Run in background to not block port binding
+    asyncio.create_task(asyncio.to_thread(load_db))
 
 
 @app.get("/")
