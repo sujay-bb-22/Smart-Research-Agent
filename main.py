@@ -86,23 +86,39 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         global db, retriever
         
-        # 🔹 Clear old database dynamically 
+        # 🔹 Append or Create database
         if db is not None:
-            try:
-                db.delete_collection()
-            except Exception as e:
-                print("⚠️ Warning: Could not delete old collection cleanly:", e)
-
-        # 🔹 Create new database with new docs
-        db = Chroma.from_documents(docs, embeddings, persist_directory="db")
-        retriever = db.as_retriever(search_kwargs={"k": 3})
-
-        print("📦 Ingestion complete")
+            db.add_documents(docs)
+            print("📦 Added new documents to existing DB")
+        else:
+            db = Chroma.from_documents(docs, embeddings, persist_directory="db")
+            retriever = db.as_retriever(search_kwargs={"k": 3})
+            print("📦 Initialized new DB with documents")
 
         return {"message": "PDF uploaded and processed successfully"}
 
     except Exception as e:
         print("❌ Upload error:", e)
+        return {"error": str(e)}
+
+@app.post("/clear")
+def clear_db():
+    global db, retriever
+    try:
+        if db is not None:
+            db.delete_collection()
+            db = None
+            retriever = None
+            print("🧹 Database cleared")
+        
+        # Also clean up saved PDFs in data folder
+        if os.path.exists("data"):
+            for filename in os.listdir("data"):
+                os.remove(os.path.join("data", filename))
+                
+        return {"message": "Database and files cleared successfully"}
+    except Exception as e:
+        print("❌ Error clearing database:", e)
         return {"error": str(e)}
 
 
