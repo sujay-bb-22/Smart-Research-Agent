@@ -2,7 +2,8 @@ export async function POST(req: Request) {
     try {
         const formData = await req.formData();
 
-        const res = await fetch("http://127.0.0.1:8000/upload", {
+        const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+        const res = await fetch(`${BACKEND_URL}/upload`, {
             method: "POST",
             body: formData,
         });
