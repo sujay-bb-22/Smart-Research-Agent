@@ -3,6 +3,24 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { 
+  FileText, 
+  Trash2, 
+  Send, 
+  Download, 
+  Copy, 
+  Check, 
+  Plus, 
+  Library, 
+  Database, 
+  BookOpen, 
+  Cpu, 
+  MessageSquare, 
+  Share2,
+  ChevronRight
+} from "lucide-react";
+import { jsPDF } from "jspdf";
+import html2canvas from "html2canvas";
 
 type Source = {
   page: number;
@@ -31,10 +49,60 @@ export default function Home() {
   const fetchFiles = async () => {
     try {
       const res = await fetch("/api/files");
-      const data = await res.json();
-      if (data.files) setFiles(data.files);
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data);
+      }
     } catch (err) {
-      console.error("Error fetching files:", err);
+      console.error("Fetch files error:", err);
+    }
+  };
+
+  // 🔹 Export Report functions
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setUploadStatus(`📋 Copied!`);
+    setTimeout(() => setUploadStatus(""), 2000);
+  };
+
+  const exportToMarkdown = () => {
+    const reportHeader = `# Research Report\nGenerated on: ${new Date().toLocaleString()}\n\n---\n\n`;
+    const chatContent = messages.map(m => 
+      `### ${m.role === 'user' ? 'User' : 'Assistant'}\n${m.content}\n\n${m.sources?.length ? `**Sources:**\n${m.sources.map(s => `- Page ${s.page}: ${s.content}`).join('\n')}\n` : ''}`
+    ).join('\n---\n\n');
+    
+    const blob = new Blob([reportHeader + chatContent], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `research_report_${new Date().getTime()}.md`;
+    a.click();
+    setUploadStatus("✅ Markdown Report Downloaded");
+  };
+
+  const exportToPDF = async () => {
+    const element = document.getElementById('chat-container');
+    if (!element) return;
+    
+    setLoading(true);
+    setUploadStatus("⚡ Generating PDF Report...");
+    
+    try {
+      const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`research_report_${new Date().getTime()}.pdf`);
+      setUploadStatus("✅ PDF Report Saved");
+    } catch (err) {
+      console.error("PDF Export error:", err);
+      setUploadStatus("❌ PDF Generation Failed");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -207,7 +275,7 @@ export default function Home() {
             {/* 🔹 Upload Section */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                <Database className="w-5 h-5 mr-2 text-blue-500" />
                 Document Upload
               </h2>
 
@@ -227,7 +295,7 @@ export default function Home() {
                 disabled={!file}
                 className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
               >
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                <Plus className="w-5 h-5 mr-2" />
                 Upload Document
               </button>
 
@@ -236,7 +304,7 @@ export default function Home() {
                 disabled={clearing}
                 className="w-full mt-3 font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center bg-red-50 text-red-600 hover:bg-red-100 border border-red-100"
               >
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                <Trash2 className="w-5 h-5 mr-2" />
                 {clearing ? 'Clearing...' : 'Clear Documents'}
               </button>
 
@@ -251,7 +319,7 @@ export default function Home() {
               {/* 🔹 Document Library */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
                 <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-                  <svg className="w-5 h-5 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                  <Library className="w-5 h-5 mr-2 text-green-500" />
                   Document Library
                 </h2>
                 
@@ -267,10 +335,10 @@ export default function Home() {
                         </div>
                         <button 
                           onClick={() => deleteFile(f.name)}
-                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all md:opacity-0 md:group-hover:opacity-100"
+                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
                           title="Delete document"
                         >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
                     ))}
@@ -282,7 +350,13 @@ export default function Home() {
           <div className="lg:col-span-2 space-y-6">
 
             {/* 🔹 Chat Section */}
-            <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2">
+            <div id="chat-container" className="space-y-6 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
+              {messages.length > 0 && (
+                <div className="flex justify-end gap-2 mb-4">
+                  <button onClick={exportToMarkdown} className="flex items-center text-xs font-bold bg-white text-gray-600 px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 shadow-sm transition-all"><Download className="w-3.5 h-3.5 mr-1.5" /> MD</button>
+                  <button onClick={exportToPDF} className="flex items-center text-xs font-bold bg-white text-gray-600 px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 shadow-sm transition-all"><Download className="w-3.5 h-3.5 mr-1.5" /> PDF</button>
+                </div>
+              )}
               {messages.map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'user' ? (
@@ -303,11 +377,14 @@ export default function Home() {
                          </>
                       ) : (
                         <>
-                          <div className="flex items-center mb-5 pb-3 border-b border-gray-100">
-                            <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mr-4">
-                              <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                          <div className="flex items-center justify-between mb-5 pb-3 border-b border-gray-100">
+                            <div className="flex items-center">
+                              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mr-4">
+                                <Cpu className="w-6 h-6 text-blue-600" />
+                              </div>
+                              <h2 className="text-xl font-bold text-gray-800 tracking-tight">Answer</h2>
                             </div>
-                            <h2 className="text-xl font-bold text-gray-800 tracking-tight">Answer</h2>
+                            <button onClick={() => copyToClipboard(msg.content, `ans-${idx}`)} className="text-gray-400 hover:text-blue-600 transition-colors p-1.5 rounded-lg hover:bg-blue-50" title="Copy Answer"><Copy className="w-4 h-4" /></button>
                           </div>
                           
                           <div className="prose prose-blue max-w-none text-gray-800 mb-8 overflow-x-auto">
@@ -318,20 +395,21 @@ export default function Home() {
 
                           {msg.sources && msg.sources.length > 0 && (
                             <div className="mt-6 bg-gray-50 p-5 rounded-xl border border-gray-100">
-                              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4 flex items-center">
-                                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                              <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center">
+                                <BookOpen className="w-4 h-4 mr-2" />
                                 Sources Consulted
                               </h3>
 
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-72 overflow-y-auto pr-2">
                                 {msg.sources.map((s, i) => (
-                                  <div key={i} className="bg-white border border-gray-200 rounded-lg p-4 text-sm hover:border-blue-300 transition-colors shadow-sm group">
-                                    <div className="mb-2">
-                                      <span className="inline-block bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded-full group-hover:bg-blue-200 transition-colors">
+                                  <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 text-sm hover:border-blue-300 transition-all shadow-sm group relative">
+                                    <div className="flex justify-between items-center mb-2">
+                                      <span className="inline-block bg-blue-50 text-blue-700 text-xs font-bold px-2 py-1 rounded-lg">
                                         Page {s.page}
                                       </span>
+                                      <button onClick={() => copyToClipboard(s.content, `src-${idx}-${i}`)} className="text-gray-300 hover:text-blue-500 transition-colors opacity-0 group-hover:opacity-100"><Copy className="w-3 h-3" /></button>
                                     </div>
-                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-200 pl-3 block line-clamp-4">"{s.content}..."</span>
+                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">"{s.content}..."</span>
                                   </div>
                                 ))}
                               </div>
@@ -372,7 +450,7 @@ export default function Home() {
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 opacity-70"></div>
               
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-purple-600 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <MessageSquare className="w-5 h-5 mr-2 text-purple-600 animate-pulse" />
                 Ask a follow-up question
               </h2>
 
@@ -392,10 +470,14 @@ export default function Home() {
                   >
                     {loading ? (
                       <>
-                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        <Cpu className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" />
                         Thinking
                       </>
-                    ) : 'Send'}
+                    ) : (
+                      <>
+                        Send <ChevronRight className="w-4 h-4 ml-1" />
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
