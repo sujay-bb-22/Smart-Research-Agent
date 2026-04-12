@@ -5,28 +5,15 @@ export async function POST(req: Request) {
             method: "POST",
         });
 
-        // ALWAYS read as text first to handle non-JSON responses from FastAPI
-        const text = await res.text();
-
-        // Try parse JSON safely
-        try {
-            const data = JSON.parse(text);
-            return Response.json(data, { status: res.status });
-        } catch (err) {
-            console.error("❌ Not JSON:", text);
-
-            return Response.json(
-                { error: "Invalid backend response", raw: text },
-                { status: 500 }
-            );
+        if (!res.ok) {
+            const errorText = await res.text();
+            return Response.json({ error: "Failed to clear documents", detail: errorText }, { status: res.status });
         }
 
+        const data = await res.json();
+        return Response.json(data);
     } catch (error) {
-        console.error("❌ Proxy crash:", error);
-
-        return Response.json(
-            { error: "Clear proxy failed" },
-            { status: 500 }
-        );
+        console.error("❌ Clear proxy failed:", error);
+        return Response.json({ error: "Clear proxy failed" }, { status: 500 });
     }
 }
