@@ -19,8 +19,7 @@ import {
   Share2,
   ChevronRight
 } from "lucide-react";
-import { jsPDF } from "jspdf";
-import html2canvas from "html2canvas";
+// 🔹 Dynamic imports for browser-only libraries to prevent SSR crashes
 
 type Source = {
   page: number;
@@ -85,9 +84,17 @@ export default function Home() {
     if (!element) return;
     
     setLoading(true);
-    setUploadStatus("⚡ Generating PDF Report...");
+    setUploadStatus("⚡ Loading PDF Engines...");
     
     try {
+      // 🔹 Dynamically load libraries only in browser
+      const [{ jsPDF }, html2canvas] = await Promise.all([
+        import("jspdf"),
+        import("html2canvas").then(m => m.default)
+      ]);
+
+      setUploadStatus("⚡ Generating PDF Report...");
+      
       const canvas = await html2canvas(element, { scale: 2, useCORS: true });
       const imgData = canvas.toDataURL('image/png');
       const pdf = new jsPDF('p', 'mm', 'a4');
