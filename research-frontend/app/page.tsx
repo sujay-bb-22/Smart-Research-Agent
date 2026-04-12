@@ -13,6 +13,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  suggestions?: string[];
   error?: string;
 };
 
@@ -72,10 +73,11 @@ export default function Home() {
   };
 
   // 🔹 Ask question
-  const askQuestion = async () => {
-    if (!question.trim()) return;
+  const askQuestion = async (overrideQuestion?: string) => {
+    const queryText = overrideQuestion || question;
+    if (!queryText.trim()) return;
 
-    const userMessage: Message = { role: "user", content: question };
+    const userMessage: Message = { role: "user", content: queryText };
     setMessages((prev) => [...prev, userMessage]);
     setQuestion("");
     setLoading(true);
@@ -119,6 +121,7 @@ export default function Home() {
                 const lastMsg = newMessages[newMessages.length - 1];
                 
                 if (data.sources) lastMsg.sources = data.sources;
+                if (data.suggestions) lastMsg.suggestions = data.suggestions;
                 if (data.content) lastMsg.content += data.content;
                 if (data.answer) lastMsg.content = data.answer;
                 if (data.error) lastMsg.error = data.error;
@@ -334,6 +337,27 @@ export default function Home() {
                               </div>
                             </div>
                           )}
+
+                          {msg.suggestions && msg.suggestions.length > 0 && (
+                            <div className="mt-6">
+                              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center">
+                                <svg className="w-3.5 h-3.5 mr-1.5 text-purple-400" fill="currentColor" viewBox="0 0 20 20"><path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.757a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 6.464A1 1 0 106.464 5.05l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zM8 16v-1a1 1 0 112 0v1a1 1 0 11-2 0zM13.464 15.05a1 1 0 010 1.414l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 14a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z" /></svg>
+                                Suggested Follow-ups
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {msg.suggestions.map((s, j) => (
+                                  <button
+                                    key={j}
+                                    onClick={() => askQuestion(s)}
+                                    className="text-sm bg-purple-50 text-purple-700 px-4 py-2 rounded-xl border border-purple-100 hover:bg-purple-100 hover:border-purple-200 transition-all text-left animate-in fade-in slide-in-from-bottom-2 duration-300"
+                                    style={{ animationDelay: `${j * 100}ms` }}
+                                  >
+                                    {s}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
@@ -362,7 +386,7 @@ export default function Home() {
                 />
                 <div className="absolute right-2 top-2">
                   <button
-                    onClick={askQuestion}
+                    onClick={() => askQuestion()}
                     disabled={loading || !question.trim()}
                     className={`px-8 py-2.5 rounded-lg font-bold transition-all flex items-center shadow-md ${loading || !question.trim() ? 'bg-gray-100 text-gray-400 cursor-not-allowed shadow-none' : 'bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-700 hover:to-blue-700 transform hover:-translate-y-0.5 active:translate-y-0 active:shadow-inner'}`}
                   >

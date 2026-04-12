@@ -236,16 +236,42 @@ async def ask_question(request: QueryRequest):
         Current Question: {query}
         
         Detailed Answer:
+        (After your answer, provide 3 suggested follow-up questions in this EXACT format: SUGGESTIONS: ["Question 1", "Question 2", "Question 3"])
         """
 
         async def event_generator():
             # Send initial sources
             yield f"data: {json.dumps({'sources': sources})}\n\n"
             
+            full_response = ""
+            suggestions_sent = False
+            
             # Stream the LLM response
             async for chunk in llm.astream(prompt):
                 if chunk.content:
-                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+                    full_response += chunk.content
+                    
+                    # Only stream content if we haven't hit the SUGGESTIONS marker
+                    if "SUGGESTIONS:" in full_response:
+                        if not suggestions_sent:
+                            # Stream everything before the marker
+                            content_before = full_response.split("SUGGESTIONS:")[0]
+                            # We can't easily "un-stream" previous chunks, so we just stop streaming new ones
+                            # and wait to parse at the end.
+                            pass 
+                    else:
+                        yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+            
+            # Extract suggestions at the end
+            if "SUGGESTIONS:" in full_response:
+                try:
+                    parts = full_response.split("SUGGESTIONS:")
+                    main_content = parts[0].strip()
+                    suggestions_str = parts[1].strip()
+                    suggestions = json.loads(suggestions_str)
+                    yield f"data: {json.dumps({'suggestions': suggestions})}\n\n"
+                except Exception as e:
+                    print("Error parsing suggestions:", e)
             
             yield "data: [DONE]\n\n"
 
