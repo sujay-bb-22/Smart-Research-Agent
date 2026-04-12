@@ -23,11 +23,53 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
   const [clearing, setClearing] = useState(false);
+  const [files, setFiles] = useState<{name: string, size: number, uploaded_at: number}[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // 🔹 Fetch files
+  const fetchFiles = async () => {
+    try {
+      const res = await fetch("/api/files");
+      const data = await res.json();
+      if (data.files) setFiles(data.files);
+    } catch (err) {
+      console.error("Error fetching files:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // 🔹 Format File Size
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // 🔹 Delete specific file
+  const deleteFile = async (filename: string) => {
+    try {
+      const res = await fetch("/api/delete_file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename })
+      });
+      if (res.ok) {
+        setUploadStatus(`🗑️ Deleted ${filename}`);
+        fetchFiles();
+      }
+    } catch (err) {
+      console.error("Delete error:", err);
+    }
+  };
 
   // 🔹 Ask question
   const askQuestion = async () => {
@@ -109,6 +151,7 @@ export default function Home() {
       if (res.ok) {
         setUploadStatus("🧹 Database cleared!");
         setMessages([]);
+        fetchFiles();
       }
     } catch (err) {
       console.error(err);
@@ -136,6 +179,7 @@ export default function Home() {
 
       if (res.ok) {
         setUploadStatus("✅ Uploaded successfully!");
+        fetchFiles();
       } else {
         setUploadStatus("❌ Upload failed");
       }
@@ -193,13 +237,43 @@ export default function Home() {
                 {clearing ? 'Clearing...' : 'Clear Documents'}
               </button>
 
-              {uploadStatus && (
-                <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
-                  {uploadStatus.includes('success') && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
-                  {uploadStatus}
-                </div>
-              )}
-            </div>
+                {uploadStatus && (
+                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') || uploadStatus.includes('✅') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') || uploadStatus.includes('❌') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                    { (uploadStatus.includes('success') || uploadStatus.includes('✅')) && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+                    {uploadStatus}
+                  </div>
+                )}
+              </div>
+
+              {/* 🔹 Document Library */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                  <svg className="w-5 h-5 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                  Document Library
+                </h2>
+                
+                {files.length === 0 ? (
+                  <p className="text-gray-400 text-sm italic py-4 text-center">No documents uploaded yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {files.map((f, i) => (
+                      <div key={i} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 group hover:border-blue-200 transition-all">
+                        <div className="flex-1 min-w-0 pr-2">
+                          <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
+                          <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                        </div>
+                        <button 
+                          onClick={() => deleteFile(f.name)}
+                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all md:opacity-0 md:group-hover:opacity-100"
+                          title="Delete document"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
           </div>
 
           <div className="lg:col-span-2 space-y-6">

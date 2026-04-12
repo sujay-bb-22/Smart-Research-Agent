@@ -52,6 +52,9 @@ class QueryRequest(BaseModel):
     question: str
     history: Optional[List[ChatMessage]] = []
 
+class DeleteRequest(BaseModel):
+    filename: str
+
 
 # 🔹 Helper: Load DB safely
 def load_db():
@@ -120,6 +123,47 @@ async def upload_pdf(file: UploadFile = File(...)):
     except Exception as e:
         print("❌ Upload error:", e)
         return {"error": str(e)}
+
+@app.get("/files")
+def list_files():
+    """List all uploaded PDF files and their basic metadata."""
+    files = []
+    if os.path.exists("data"):
+        for filename in os.listdir("data"):
+            if filename.endswith(".pdf"):
+                file_path = os.path.join("data", filename)
+                files.append({
+                    "name": filename,
+                    "size": os.path.getsize(file_path),
+                    "uploaded_at": os.path.getmtime(file_path)
+                })
+    return {"files": files}
+
+
+@app.post("/delete_file")
+def delete_file(request: DeleteRequest):
+    """Delete a specific file from storage and the vector database."""
+    global db, retriever
+    try:
+        filename = request.filename
+        file_path = os.path.join("data", filename)
+        
+        # 1. Delete chunks from Vector DB (using source metadata)
+        if db is not None:
+            # Important: Filename must match what was saved in metadata during ingest
+            db.delete(where={"source": file_path})
+            print(f"🗑️ Removed {filename} chunks from Chroma DB")
+            
+        # 2. Delete the physical file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"📄 Deleted file: {filename}")
+            
+        return {"message": f"Successfully deleted {filename}"}
+    except Exception as e:
+        print("❌ Deletion error:", e)
+        return {"error": str(e)}
+
 
 @app.post("/clear")
 def clear_db():
