@@ -7,6 +7,7 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import os
 import shutil
+from typing import List, Optional
 
 from ingest import get_pdf_chunks
 
@@ -40,8 +41,13 @@ llm = ChatGroq(
 )
 
 # 🔹 Request format
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class QueryRequest(BaseModel):
     question: str
+    history: Optional[List[ChatMessage]] = []
 
 
 # 🔹 Helper: Load DB safely
@@ -157,18 +163,29 @@ def ask_question(request: QueryRequest):
         if not docs:
             return {"answer": "No relevant information found.", "sources": []}
 
+        # 🔹 Format context and history for the prompt
         context = "\n\n".join([doc.page_content for doc in docs])
+        
+        # Limit history to last 5 exchanges to keep within context window
+        history = request.history[-10:] if request.history else []
+        history_str = "\n".join([f"{m.role.capitalize()}: {m.content}" for m in history])
 
         prompt = f"""
-        Answer the question based ONLY on the context below.
+        You are a helpful research assistant. Answer the question based ONLY on the provided context.
+        If the answer is not in the context, say you don't know based on the document.
+        Use the chat history below for context when answering follow-up questions.
 
-        Context:
+        Context Information:
+        ---------------------
         {context}
+        ---------------------
 
-        Question:
-        {query}
+        Chat History:
+        {history_str}
 
-        Answer:
+        Current Question: {query}
+        
+        Detailed Answer:
         """
 
         response = llm.invoke(prompt)

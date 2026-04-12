@@ -44,7 +44,10 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ question: userMessage.content }),
+        body: JSON.stringify({ 
+          question: userMessage.content,
+          history: messages.map(m => ({ role: m.role, content: m.content }))
+        }),
       });
 
       const data = await res.json();
