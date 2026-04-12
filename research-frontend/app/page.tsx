@@ -50,10 +50,12 @@ export default function Home() {
       const res = await fetch("/api/files");
       if (res.ok) {
         const data = await res.json();
-        setFiles(data);
+        const fileList = data.files || (Array.isArray(data) ? data : []);
+        setFiles(fileList);
       }
     } catch (err) {
       console.error("Fetch files error:", err);
+      setFiles([]);
     }
   };
 
@@ -330,7 +332,7 @@ export default function Home() {
                   Document Library
                 </h2>
                 
-                {files.length === 0 ? (
+                {!files || !Array.isArray(files) || files.length === 0 ? (
                   <p className="text-gray-400 text-sm italic py-4 text-center">No documents uploaded yet.</p>
                 ) : (
                   <div className="space-y-3">
