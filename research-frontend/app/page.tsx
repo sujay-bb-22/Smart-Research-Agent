@@ -172,37 +172,6 @@ export default function Home() {
           </div>
 
           <div className="lg:col-span-2 space-y-6">
-            {/* 🔹 Question Section */}
-            <div className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
-              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                Ask Questions
-              </h2>
-
-              <div className="relative">
-                <input
-                  className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl p-4 pr-32 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all shadow-sm"
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  placeholder="What would you like to know from the document?"
-                  onKeyDown={(e) => e.key === 'Enter' && askQuestion()}
-                />
-                <div className="absolute right-2 top-2">
-                  <button
-                    onClick={askQuestion}
-                    disabled={loading || !question.trim()}
-                    className={`px-6 py-2 rounded-lg font-medium transition-all flex items-center ${loading || !question.trim() ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-purple-600 text-white hover:bg-purple-700 shadow-sm hover:shadow transform hover:-translate-y-0.5'}`}
-                  >
-                    {loading ? (
-                      <>
-                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                        Thinking
-                      </>
-                    ) : 'Ask'}
-                  </button>
-                </div>
-              </div>
-            </div>
 
             {/* 🔹 Chat Section */}
             <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2">
@@ -267,6 +236,41 @@ export default function Home() {
                 </div>
               ))}
               <div ref={messagesEndRef} />
+            </div>
+
+            {/* 🔹 Question Section (Relocated) */}
+            <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-100 transition-all hover:shadow-xl relative overflow-hidden group">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 opacity-70"></div>
+              
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                <svg className="w-5 h-5 mr-2 text-purple-600 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Ask a follow-up question
+              </h2>
+
+              <div className="relative">
+                <input
+                  className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl p-4 pr-32 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all shadow-inner group-hover:bg-white"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="Ask anything about the document..."
+                  onKeyDown={(e) => e.key === 'Enter' && askQuestion()}
+                />
+                <div className="absolute right-2 top-2">
+                  <button
+                    onClick={askQuestion}
+                    disabled={loading || !question.trim()}
+                    className={`px-8 py-2.5 rounded-lg font-bold transition-all flex items-center shadow-md ${loading || !question.trim() ? 'bg-gray-100 text-gray-400 cursor-not-allowed shadow-none' : 'bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-700 hover:to-blue-700 transform hover:-translate-y-0.5 active:translate-y-0 active:shadow-inner'}`}
+                  >
+                    {loading ? (
+                      <>
+                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        Thinking
+                      </>
+                    ) : 'Send'}
+                  </button>
+                </div>
+              </div>
+              <p className="mt-3 text-xs text-gray-400 text-center italic">Tip: Press Enter to quickly send your question</p>
             </div>
           </div>
         </div>
