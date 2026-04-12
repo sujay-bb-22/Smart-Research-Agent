@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import os
@@ -49,8 +49,8 @@ def load_db():
     global db, retriever, embeddings
 
     if embeddings is None:
-        print("🔄 Loading embeddings...")
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        print("🔄 Loading Google Gemini embeddings...")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
     try:
         print("🔄 Loading vector DB...")
