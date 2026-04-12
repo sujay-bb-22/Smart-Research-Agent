@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.vectorstores import Chroma
@@ -7,6 +8,8 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import os
 import shutil
+import json
+import asyncio
 from typing import List, Optional
 
 from ingest import get_pdf_chunks
@@ -140,33 +143,36 @@ def clear_db():
 
 
 @app.post("/ask")
-def ask_question(request: QueryRequest):
+async def ask_question(request: QueryRequest):
     global retriever
 
     if retriever is None:
         load_db()
 
-    # 🔴 FIX 1: Handle no DB
     if retriever is None:
         return {"error": "No document uploaded yet"}
 
     query = request.question.strip()
-
-    # 🔴 FIX 2: Empty question check
     if not query:
         return {"error": "Question is empty"}
 
     try:
         # 🔹 Retrieve documents
         docs = retriever.invoke(query)
+        sources = []
+        for doc in docs:
+            sources.append({
+                "page": doc.metadata.get("page", "unknown"),
+                "content": doc.page_content[:200]
+            })
 
         if not docs:
-            return {"answer": "No relevant information found.", "sources": []}
+            async def empty_gen():
+                yield f"data: {json.dumps({'answer': 'No relevant information found.', 'sources': []})}\n\n"
+            return StreamingResponse(empty_gen(), media_type="text/event-stream")
 
         # 🔹 Format context and history for the prompt
         context = "\n\n".join([doc.page_content for doc in docs])
-        
-        # Limit history to last 5 exchanges to keep within context window
         history = request.history[-10:] if request.history else []
         history_str = "\n".join([f"{m.role.capitalize()}: {m.content}" for m in history])
 
@@ -188,21 +194,21 @@ def ask_question(request: QueryRequest):
         Detailed Answer:
         """
 
-        response = llm.invoke(prompt)
+        async def event_generator():
+            # Send initial sources
+            yield f"data: {json.dumps({'sources': sources})}\n\n"
+            
+            # Stream the LLM response
+            async for chunk in llm.astream(prompt):
+                if chunk.content:
+                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+            
+            yield "data: [DONE]\n\n"
 
-        # 🔹 Prepare sources
-        sources = []
-        for doc in docs:
-            sources.append({
-                "page": doc.metadata.get("page", "unknown"),
-                "content": doc.page_content[:200]
-            })
-
-        return {
-            "answer": response.content,
-            "sources": sources
-        }
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     except Exception as e:
         print("❌ Query error:", e)
-        return {"error": str(e)}
+        async def err_gen():
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")

@@ -50,23 +50,51 @@ export default function Home() {
         }),
       });
 
-      const data = await res.json();
+      if (!res.ok) throw new Error("Failed to fetch");
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
       
-      const assistantMessage: Message = {
-        role: "assistant",
-        content: data.error ? "" : data.answer,
-        sources: data.sources,
-        error: data.error
-      };
-      
-      setMessages((prev) => [...prev, assistantMessage]);
+      // Add an empty assistant message that we'll update
+      setMessages((prev) => [...prev, { role: "assistant", content: "", sources: [] }]);
+
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6).trim();
+            if (!dataStr || dataStr === "[DONE]") continue;
+
+            try {
+              const data = JSON.parse(dataStr);
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                const lastMsg = newMessages[newMessages.length - 1];
+                
+                if (data.sources) lastMsg.sources = data.sources;
+                if (data.content) lastMsg.content += data.content;
+                if (data.answer) lastMsg.content = data.answer;
+                if (data.error) lastMsg.error = data.error;
+                
+                return newMessages;
+              });
+            } catch (e) {
+              console.error("Error parsing stream chunk:", e);
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error(error);
-      
       setMessages((prev) => [...prev, {
         role: "assistant",
         content: "",
-        error: "Error fetching answer"
+        error: "Error fetching answer. Please try again."
       }]);
     } finally {
       setLoading(false);
