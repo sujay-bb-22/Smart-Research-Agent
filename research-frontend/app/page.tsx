@@ -34,6 +34,37 @@ type Message = {
   error?: string;
 };
 
+const SUPPORTED_FORMAT_MESSAGE = "Supported formats: PDF, DOCX.";
+
+const validateSelectedFile = (selectedFile: File | null) => {
+  if (!selectedFile) {
+    return { valid: false, message: "No file selected. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  const fileName = selectedFile.name.toLowerCase();
+  const isPdf = fileName.endsWith(".pdf");
+  const isDocx = fileName.endsWith(".docx");
+
+  if (!isPdf && !isDocx) {
+    return { valid: false, message: "Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  const mimeType = selectedFile.type.toLowerCase();
+  const validMimeTypes = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-office",
+    "application/octet-stream",
+    "application/zip",
+  ];
+
+  if (mimeType && !validMimeTypes.includes(mimeType)) {
+    return { valid: false, message: "Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  return { valid: true, message: "" };
+};
+
 export default function Home() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -289,14 +320,29 @@ export default function Home() {
               </h2>
 
               <div className="mb-5">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Select PDF File</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Select a document</label>
                 <div className="relative">
                   <input
                     type="file"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                    accept=".pdf,.docx"
+                    onChange={(e) => {
+                      const nextFile = e.target.files?.[0] || null;
+                      const validation = validateSelectedFile(nextFile);
+
+                      if (!validation.valid) {
+                        setFile(null);
+                        setUploadStatus(`❌ ${validation.message}`);
+                        e.target.value = "";
+                        return;
+                      }
+
+                      setFile(nextFile);
+                      setUploadStatus("");
+                    }}
                     className="block w-full text-sm text-gray-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors cursor-pointer border border-gray-200 rounded-xl"
                   />
                 </div>
+                <p className="mt-2 text-xs text-gray-500">{SUPPORTED_FORMAT_MESSAGE}</p>
               </div>
 
               <button

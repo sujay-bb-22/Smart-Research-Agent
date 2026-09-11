@@ -1,5 +1,4 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.vectorstores import Chroma
@@ -12,7 +11,9 @@ import json
 import asyncio
 from typing import List, Optional
 
-from ingest import get_pdf_chunks
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from ingest import get_pdf_chunks, validate_upload_file
 
 load_dotenv()
 
@@ -90,6 +91,19 @@ def home():
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
+        if file.filename is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No file selected.", "message": "Supported formats: PDF, DOCX."},
+            )
+
+        is_valid, validation_message = validate_upload_file(file.filename, file.content_type)
+        if not is_valid:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unsupported file type", "message": validation_message},
+            )
+
         file_path = os.path.join("data", file.filename)
 
         # 🔹 Save file
@@ -100,15 +114,18 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         # 🔹 Get chunks
         docs = get_pdf_chunks(file_path)
-        
+
         if docs is None:
-            return {"error": "Failed to process PDF"}
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Failed to process document", "message": "Unable to read the uploaded file."},
+            )
 
         global db, retriever, embeddings
-        
+
         if embeddings is None:
             load_db()
-        
+
         # 🔹 Append or Create database
         if db is not None:
             db.add_documents(docs)
@@ -118,11 +135,14 @@ async def upload_pdf(file: UploadFile = File(...)):
             retriever = db.as_retriever(search_kwargs={"k": 3})
             print("📦 Initialized new DB with documents")
 
-        return {"message": "PDF uploaded and processed successfully"}
+        return {"message": "Document uploaded and processed successfully"}
 
     except Exception as e:
         print("❌ Upload error:", e)
-        return {"error": str(e)}
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Upload failed", "message": str(e)},
+        )
 
 @app.get("/files")
 def list_files():
