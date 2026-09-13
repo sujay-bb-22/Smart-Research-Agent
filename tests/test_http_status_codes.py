@@ -192,14 +192,44 @@ def test_ask_valid_request_returns_200_streaming(monkeypatch):
     assert "text/event-stream" in response.headers.get("content-type", "")
 
 
-def test_files_success_returns_200():
-    file_path = os.path.join("data", "sample.pdf")
-    with open(file_path, "wb") as fh:
+def test_files_empty_directory_returns_empty_list():
+    response = client.get("/files")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"files": []}
+
+
+def test_files_lists_supported_document_types_only():
+    for filename in ["alpha.pdf", "beta.docx", "notes.txt", "gamma.PDF", "delta.DOCX"]:
+        with open(os.path.join("data", filename), "wb") as fh:
+            fh.write(b"placeholder")
+
+    response = client.get("/files")
+
+    assert response.status_code == status.HTTP_200_OK
+    file_names = [entry["name"] for entry in response.json()["files"]]
+    assert "alpha.pdf" in file_names
+    assert "beta.docx" in file_names
+    assert "gamma.PDF" in file_names
+    assert "delta.DOCX" in file_names
+    assert "notes.txt" not in file_names
+
+
+def test_files_excludes_unsupported_types_and_handles_case_insensitive_extensions():
+    with open(os.path.join("data", "report.pdf"), "wb") as fh:
+        fh.write(b"placeholder")
+    with open(os.path.join("data", "chapter.DOCX"), "wb") as fh:
+        fh.write(b"placeholder")
+    with open(os.path.join("data", "image.png"), "wb") as fh:
         fh.write(b"placeholder")
 
     response = client.get("/files")
 
     assert response.status_code == status.HTTP_200_OK
+    file_names = [entry["name"] for entry in response.json()["files"]]
+    assert "report.pdf" in file_names
+    assert "chapter.DOCX" in file_names
+    assert "image.png" not in file_names
 
 
 def test_files_failure_returns_500(monkeypatch):

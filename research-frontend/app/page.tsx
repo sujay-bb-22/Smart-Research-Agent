@@ -87,14 +87,16 @@ export default function Home() {
   const fetchFiles = async () => {
     try {
       const res = await fetch("/api/files");
-      if (res.ok) {
-        const data = await res.json();
-        const fileList = data.files || (Array.isArray(data) ? data : []);
-        setFiles(fileList);
+      if (!res.ok) {
+        console.error("Fetch files failed:", res.status);
+        return;
       }
+
+      const data = await res.json();
+      const fileList = Array.isArray(data?.files) ? data.files : Array.isArray(data) ? data : [];
+      setFiles(fileList);
     } catch (err) {
       console.error("Fetch files error:", err);
-      setFiles([]);
     }
   };
 
@@ -188,7 +190,7 @@ export default function Home() {
       }
 
       setUploadStatus(`🗑️ Deleted ${filename}`);
-      fetchFiles();
+      await fetchFiles();
     } catch (err) {
       console.error("Delete error:", err);
       setUploadStatus("❌ Delete failed: network error.");
@@ -284,7 +286,7 @@ export default function Home() {
 
       setUploadStatus("🧹 Database cleared!");
       setMessages([]);
-      fetchFiles();
+      await fetchFiles();
     } catch (err) {
       console.error(err);
       setUploadStatus("❌ Clear failed: network error.");
@@ -323,7 +325,7 @@ export default function Home() {
       if (res.ok && successMessage === "Document uploaded and processed successfully") {
         setUploadStatus("✅ Uploaded successfully!");
         setFile(null);
-        fetchFiles();
+        await fetchFiles();
         return;
       }
 
@@ -501,7 +503,7 @@ export default function Home() {
                                       </span>
                                       <button onClick={() => copyToClipboard(s.content)} className="text-gray-300 hover:text-blue-500 transition-colors opacity-0 group-hover:opacity-100"><Copy className="w-3 h-3" /></button>
                                     </div>
-                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">“{s.content}...”</span>
+                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">&ldquo;{s.content}...&rdquo;</span>
                                   </div>
                                 ))}
                               </div>
@@ -515,7 +517,7 @@ export default function Home() {
                                 Suggested Follow-ups
                               </p>
                               <div className="flex flex-wrap gap-2">
-                                {msg.suggestions.map((s, j) => (
+                                                        {msg.suggestions.map((s, j) => (
                                   <button
                                     key={j}
                                     onClick={() => askQuestion(s)}
