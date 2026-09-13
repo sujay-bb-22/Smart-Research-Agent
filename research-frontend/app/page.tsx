@@ -36,6 +36,17 @@ type Message = {
 
 const SUPPORTED_FORMAT_MESSAGE = "Supported formats: PDF, DOCX.";
 
+const getErrorMessage = (payload: unknown, fallback: string) => {
+  if (!payload || typeof payload !== "object") return fallback;
+
+  const data = payload as Record<string, unknown>;
+  if (typeof data.detail === "string" && data.detail.trim()) return data.detail.trim();
+  if (typeof data.error === "string" && data.error.trim()) return data.error.trim();
+  if (typeof data.message === "string" && data.message.trim()) return data.message.trim();
+
+  return fallback;
+};
+
 const validateSelectedFile = (selectedFile: File | null) => {
   if (!selectedFile) {
     return { valid: false, message: "No file selected. " + SUPPORTED_FORMAT_MESSAGE };
@@ -171,12 +182,19 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename })
       });
-      if (res.ok) {
-        setUploadStatus(`🗑️ Deleted ${filename}`);
-        fetchFiles();
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        const message = getErrorMessage(payload, "Delete failed.");
+        setUploadStatus(`❌ ${message}`);
+        return;
       }
+
+      setUploadStatus(`🗑️ Deleted ${filename}`);
+      fetchFiles();
     } catch (err) {
       console.error("Delete error:", err);
+      setUploadStatus("❌ Delete failed: network error.");
     }
   };
 
@@ -259,44 +277,66 @@ export default function Home() {
     try {
       setClearing(true);
       const res = await fetch("/api/clear", { method: "POST" });
-      if (res.ok) {
-        setUploadStatus("🧹 Database cleared!");
-        setMessages([]);
-        fetchFiles();
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        const message = getErrorMessage(payload, "Unable to clear documents.");
+        setUploadStatus(`❌ ${message}`);
+        return;
       }
+
+      setUploadStatus("🧹 Database cleared!");
+      setMessages([]);
+      fetchFiles();
     } catch (err) {
       console.error(err);
+      setUploadStatus("❌ Clear failed: network error.");
     } finally {
       setClearing(false);
     }
   };
 
-  // 🔹 Upload PDF
-  const uploadPDF = async () => {
-    if (!file) return;
+  // 🔹 Upload document
+  const uploadDocument = async () => {
+    if (!file || loading) return;
 
     const formData = new FormData();
     formData.append("file", file);
 
-    try {
-      setUploadStatus("Uploading...");
+    setUploadStatus("Uploading...");
+    setLoading(true);
 
+    try {
       const res = await fetch("/api/upload", {
         method: "POST",
         body: formData,
       });
 
-      const data = await res.json();
-
-      if (res.ok) {
-        setUploadStatus("✅ Uploaded successfully!");
-        fetchFiles();
-      } else {
-        setUploadStatus("❌ Upload failed");
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
       }
+
+      const successMessage = typeof data === "object" && data !== null && "message" in data
+        ? String((data as { message?: unknown }).message ?? "")
+        : "";
+
+      if (res.ok && successMessage === "Document uploaded and processed successfully") {
+        setUploadStatus("✅ Uploaded successfully!");
+        setFile(null);
+        fetchFiles();
+        return;
+      }
+
+      const message = getErrorMessage(data, "Upload failed.");
+      setUploadStatus(`❌ ${message}`);
     } catch (error) {
       console.error(error);
-      setUploadStatus("❌ Error uploading file");
+      setUploadStatus("❌ Upload failed: network error. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -346,9 +386,9 @@ export default function Home() {
               </div>
 
               <button
-                onClick={uploadPDF}
-                disabled={!file}
-                className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                onClick={uploadDocument}
+                disabled={!file || loading}
+                className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file && !loading ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
               >
                 <Plus className="w-5 h-5 mr-2" />
                 Upload Document
