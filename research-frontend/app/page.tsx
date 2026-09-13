@@ -3,21 +3,17 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { 
-  FileText, 
-  Trash2, 
-  Send, 
-  Download, 
-  Copy, 
-  Check, 
-  Plus, 
-  Library, 
-  Database, 
-  BookOpen, 
-  Cpu, 
-  MessageSquare, 
-  Share2,
-  ChevronRight
+import {
+  Trash2,
+  Download,
+  Copy,
+  Plus,
+  Library,
+  Database,
+  BookOpen,
+  Cpu,
+  MessageSquare,
+  ChevronRight,
 } from "lucide-react";
 // 🔹 Dynamic imports for browser-only libraries to prevent SSR crashes
 
@@ -80,6 +76,7 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
   const [clearing, setClearing] = useState(false);
@@ -102,7 +99,7 @@ export default function Home() {
   };
 
   // 🔹 Export Report functions
-  const copyToClipboard = (text: string, id: string) => {
+  const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setUploadStatus(`📋 Copied!`);
     setTimeout(() => setUploadStatus(""), 2000);
@@ -298,13 +295,13 @@ export default function Home() {
 
   // 🔹 Upload document
   const uploadDocument = async () => {
-    if (!file || loading) return;
+    if (!file || uploading) return;
 
     const formData = new FormData();
     formData.append("file", file);
 
     setUploadStatus("Uploading...");
-    setLoading(true);
+    setUploading(true);
 
     try {
       const res = await fetch("/api/upload", {
@@ -336,7 +333,7 @@ export default function Home() {
       console.error(error);
       setUploadStatus("❌ Upload failed: network error. Please try again.");
     } finally {
-      setLoading(false);
+      setUploading(false);
     }
   };
 
@@ -387,8 +384,8 @@ export default function Home() {
 
               <button
                 onClick={uploadDocument}
-                disabled={!file || loading}
-                className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file && !loading ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                disabled={!file || uploading}
+                className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file && !uploading ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
               >
                 <Plus className="w-5 h-5 mr-2" />
                 Upload Document
@@ -479,7 +476,7 @@ export default function Home() {
                               </div>
                               <h2 className="text-xl font-bold text-gray-800 tracking-tight">Answer</h2>
                             </div>
-                            <button onClick={() => copyToClipboard(msg.content, `ans-${idx}`)} className="text-gray-400 hover:text-blue-600 transition-colors p-1.5 rounded-lg hover:bg-blue-50" title="Copy Answer"><Copy className="w-4 h-4" /></button>
+                            <button onClick={() => copyToClipboard(msg.content)} className="text-gray-400 hover:text-blue-600 transition-colors p-1.5 rounded-lg hover:bg-blue-50" title="Copy Answer"><Copy className="w-4 h-4" /></button>
                           </div>
                           
                           <div className="prose prose-blue max-w-none text-gray-800 mb-8 overflow-x-auto">
@@ -502,9 +499,9 @@ export default function Home() {
                                       <span className="inline-block bg-blue-50 text-blue-700 text-xs font-bold px-2 py-1 rounded-lg">
                                         Page {s.page}
                                       </span>
-                                      <button onClick={() => copyToClipboard(s.content, `src-${idx}-${i}`)} className="text-gray-300 hover:text-blue-500 transition-colors opacity-0 group-hover:opacity-100"><Copy className="w-3 h-3" /></button>
+                                      <button onClick={() => copyToClipboard(s.content)} className="text-gray-300 hover:text-blue-500 transition-colors opacity-0 group-hover:opacity-100"><Copy className="w-3 h-3" /></button>
                                     </div>
-                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">"{s.content}..."</span>
+                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">“{s.content}...”</span>
                                   </div>
                                 ))}
                               </div>

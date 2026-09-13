@@ -17,7 +17,7 @@ export async function POST(req: Request) {
         try {
             const data = JSON.parse(text);
             return Response.json(data, { status: res.status });
-        } catch (err) {
+        } catch {
             console.error("❌ Not JSON:", text);
 
             return Response.json(
