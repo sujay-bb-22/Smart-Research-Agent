@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import json
 import os
 import shutil
+import uuid
 from typing import List, Optional
 
 from ingest import get_pdf_chunks, validate_upload_file
@@ -29,14 +30,27 @@ app.add_middleware(
 db = None
 retriever = None
 embeddings = None
+llm = None
 
 os.makedirs("data", exist_ok=True)
 os.makedirs("db", exist_ok=True)
 
-llm = ChatGroq(
-    groq_api_key=os.getenv("GROQ_API_KEY"),
-    model_name="openai/gpt-oss-20b",
-)
+
+def get_llm():
+    global llm
+
+    if llm is not None:
+        return llm
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
+
+    llm = ChatGroq(
+        groq_api_key=api_key,
+        model_name="openai/gpt-oss-20b",
+    )
+    return llm
 
 
 class ChatMessage(BaseModel):
@@ -51,6 +65,10 @@ class QueryRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     filename: str
+
+
+def generate_document_id(filename: str | None = None) -> str:
+    return str(uuid.uuid4())
 
 
 def load_db():
@@ -99,7 +117,12 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail="Unable to save uploaded file.",
         ) from exc
 
-    docs = get_pdf_chunks(file_path)
+    document_id = generate_document_id(file.filename)
+    try:
+        docs = get_pdf_chunks(file_path, document_id=document_id)
+    except TypeError:
+        docs = get_pdf_chunks(file_path)
+
     if docs is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -236,6 +259,15 @@ async def ask_question(request: QueryRequest):
             detail="No document uploaded yet.",
         )
 
+    if llm is None:
+        try:
+            get_llm()
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="LLM is unavailable.",
+            ) from exc
+
     try:
         docs = retriever.invoke(query)
     except Exception as exc:
@@ -303,3 +335,4 @@ async def ask_question(request: QueryRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+ 

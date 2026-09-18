@@ -1,4 +1,5 @@
 import os
+import uuid
 import zipfile
 from xml.etree import ElementTree as ET
 
@@ -81,9 +82,12 @@ def load_docx_documents(docx_path: str):
     ]
 
 
-def get_pdf_chunks(pdf_path):
+def get_pdf_chunks(pdf_path, document_id=None):
     try:
         print(f"📄 Starting ingestion for: {pdf_path}")
+
+        if document_id is None:
+            document_id = str(uuid.uuid4())
 
         file_type = detect_document_loader(pdf_path)
 
@@ -105,6 +109,10 @@ def get_pdf_chunks(pdf_path):
             chunk_overlap=50,
         )
         docs = splitter.split_documents(documents)
+        for doc in docs:
+            if doc.metadata is None:
+                doc.metadata = {}
+            doc.metadata["document_id"] = document_id
 
         print(f"✂️ Split into {len(docs)} chunks")
 
