@@ -18,7 +18,7 @@ import {
 // 🔹 Dynamic imports for browser-only libraries to prevent SSR crashes
 
 type Source = {
-  page: number;
+  page: number | string;
   content: string;
 };
 
@@ -110,7 +110,7 @@ export default function Home() {
   const exportToMarkdown = () => {
     const reportHeader = `# Research Report\nGenerated on: ${new Date().toLocaleString()}\n\n---\n\n`;
     const chatContent = messages.map(m => 
-      `### ${m.role === 'user' ? 'User' : 'Assistant'}\n${m.content}\n\n${m.sources?.length ? `**Sources:**\n${m.sources.map(s => `- Page ${s.page}: ${s.content}`).join('\n')}\n` : ''}`
+      `### ${m.role === 'user' ? 'User' : 'Assistant'}\n${m.content}\n\n${m.sources?.length ? `**Sources:**\n${m.sources.map(s => `- ${typeof s.page === 'number' ? `Page ${s.page}` : `Location ${s.page}`}: ${s.content}`).join('\n')}\n` : ''}`
     ).join('\n---\n\n');
     
     const blob = new Blob([reportHeader + chatContent], { type: 'text/markdown' });

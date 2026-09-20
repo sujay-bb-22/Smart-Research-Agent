@@ -77,18 +77,19 @@ def load_docx_documents(docx_path: str):
     return [
         Document(
             page_content="\n".join(paragraphs),
-            metadata={"source": docx_path, "page": 1},
+            metadata={"source": docx_path, "location": "section-1"},
         )
     ]
 
 
-def get_pdf_chunks(pdf_path, document_id=None):
+def get_pdf_chunks(pdf_path, document_id=None, filename=None):
     try:
         print(f"📄 Starting ingestion for: {pdf_path}")
 
         if document_id is None:
             document_id = str(uuid.uuid4())
 
+        file_name = filename or os.path.basename(pdf_path)
         file_type = detect_document_loader(pdf_path)
 
         if file_type == "pdf":
@@ -109,10 +110,20 @@ def get_pdf_chunks(pdf_path, document_id=None):
             chunk_overlap=50,
         )
         docs = splitter.split_documents(documents)
-        for doc in docs:
+        for index, doc in enumerate(docs, start=1):
             if doc.metadata is None:
                 doc.metadata = {}
-            doc.metadata["document_id"] = document_id
+
+            metadata = dict(doc.metadata)
+            metadata["document_id"] = document_id
+            metadata["filename"] = file_name
+            metadata["source"] = metadata.get("source") or pdf_path
+            metadata["chunk_id"] = f"{document_id}-chunk-{index:03d}"
+
+            if "page" not in metadata and "location" not in metadata:
+                metadata["location"] = "document-body"
+
+            doc.metadata = metadata
 
         print(f"✂️ Split into {len(docs)} chunks")
 

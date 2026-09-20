@@ -119,9 +119,12 @@ async def upload_pdf(file: UploadFile = File(None)):
 
     document_id = generate_document_id(file.filename)
     try:
-        docs = get_pdf_chunks(file_path, document_id=document_id)
+        docs = get_pdf_chunks(file_path, document_id=document_id, filename=file.filename)
     except TypeError:
-        docs = get_pdf_chunks(file_path)
+        try:
+            docs = get_pdf_chunks(file_path, document_id=document_id)
+        except TypeError:
+            docs = get_pdf_chunks(file_path)
 
     if docs is None:
         raise HTTPException(
@@ -278,8 +281,11 @@ async def ask_question(request: QueryRequest):
 
     sources = []
     for doc in docs:
+        source_location = doc.metadata.get("page")
+        if source_location is None:
+            source_location = doc.metadata.get("location", "unknown")
         sources.append({
-            "page": doc.metadata.get("page", "unknown"),
+            "page": source_location,
             "content": doc.page_content[:200],
         })
 
