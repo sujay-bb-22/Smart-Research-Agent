@@ -8,7 +8,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import FakeEmbeddings
@@ -25,11 +25,18 @@ from ingest import (
 
 load_dotenv()
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,6 +77,7 @@ class ChatMessage(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     history: Optional[List[ChatMessage]] = None
+    selected_document_ids: Optional[List[str]] = None
 
 
 class DeleteRequest(BaseModel):
@@ -81,6 +89,116 @@ DOCUMENT_REGISTRY_PATH = os.path.join("data", "documents.json")
 
 def generate_document_id(filename: str | None = None) -> str:
     return str(uuid.uuid4())
+
+
+def sanitize_filename(filename: str | None) -> str:
+    if not filename:
+        return ""
+
+    cleaned = filename.strip().replace("\\", "/")
+    if not cleaned:
+        return ""
+
+    raw_parts = [part.strip() for part in cleaned.split("/") if part.strip()]
+    if not raw_parts:
+        return ""
+
+    leading_traversal = 0
+    parts = []
+    for part in raw_parts:
+        if part in {".", ".."}:
+            if part == "..":
+                leading_traversal += 1
+            continue
+        parts.append(part)
+
+    if not parts:
+        return ""
+
+    if leading_traversal > 1:
+        parts = parts[-1:]
+
+    stem, extension = os.path.splitext(parts[-1])
+    if len(parts) > 1:
+        name = "_".join(part for part in parts[:-1]) + f"_{stem}"
+    else:
+        name = stem
+
+    name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in name)
+    name = name.strip("._") or "document"
+    extension = extension.lower() if extension.lower() in {".pdf", ".docx"} else ""
+    return f"{name}{extension}"
+
+
+def is_summary_question(question: str) -> bool:
+    normalized = (question or "").lower()
+    triggers = (
+        "summarize",
+        "summary",
+        "overview",
+        "main points",
+        "main conclusion",
+        "what is this document about",
+        "give me an overview",
+        "explain the document",
+        "document overview",
+        "key findings",
+        "what are the key findings",
+        "explain the main points",
+    )
+    return any(trigger in normalized for trigger in triggers)
+
+
+def validate_selected_document_ids(selected_document_ids, registry=None):
+    if not selected_document_ids:
+        return []
+
+    valid_ids = []
+    seen = set()
+
+    known_registry_ids = set(registry.keys()) if isinstance(registry, dict) else set()
+
+    for document_id in selected_document_ids:
+        if document_id is None:
+            continue
+        candidate = str(document_id).strip()
+        if not candidate or candidate in seen:
+            continue
+
+        if isinstance(registry, dict) and known_registry_ids:
+            if candidate not in known_registry_ids:
+                continue
+            record = registry.get(candidate, {})
+            if record.get("deleted"):
+                continue
+
+        valid_ids.append(candidate)
+        seen.add(candidate)
+
+    return valid_ids
+
+
+def _build_document_scope_filter(selected_document_ids):
+    valid_ids = validate_selected_document_ids(selected_document_ids)
+    if not valid_ids:
+        return None
+    return {"document_id": {"$in": valid_ids}}
+
+
+def _filter_documents_by_scope(documents, selected_document_ids):
+    if not selected_document_ids:
+        return documents or []
+
+    valid_ids = set(validate_selected_document_ids(selected_document_ids))
+    if not valid_ids:
+        return []
+
+    filtered = []
+    for doc in documents or []:
+        metadata = getattr(doc, "metadata", {}) or {}
+        if metadata.get("document_id") in valid_ids:
+            filtered.append(doc)
+    return filtered
 
 
 def _call_ingestion_with_metadata(file_path: str, document_id: str, filename: str):
@@ -191,6 +309,22 @@ def home():
     return {"message": "Smart Research Assistant API running"}
 
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "smart-research-agent"}
+
+
+@app.get("/ready")
+def readiness_check():
+    db_state = "ready" if db is not None else "not_ready"
+    if db_state == "not_ready":
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not_ready", "database": db_state},
+        )
+    return {"status": "ready", "database": db_state}
+
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(None)):
     if file is None or file.filename is None or not file.filename.strip():
@@ -199,21 +333,40 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail="No file selected. Supported formats: PDF, DOCX.",
         )
 
-    is_valid, validation_message = validate_upload_file(file.filename, file.content_type)
+    sanitized_filename = sanitize_filename(file.filename)
+    if not sanitized_filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file name.",
+        )
+
+    is_valid, validation_message = validate_upload_file(sanitized_filename, file.content_type)
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=validation_message,
         )
 
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Uploaded file exceeds the maximum size of {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+
     document_id = generate_document_id(file.filename)
-    extension = os.path.splitext(file.filename)[1].lower()
+    extension = os.path.splitext(sanitized_filename)[1].lower()
     safe_storage_name = f"{document_id}{extension}"
     file_path = os.path.join("data", safe_storage_name)
 
     try:
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(file_bytes)
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -404,6 +557,15 @@ async def ask_question(request: QueryRequest):
             detail="Question is empty.",
         )
 
+    selected_document_ids = validate_selected_document_ids(request.selected_document_ids)
+    if request.selected_document_ids is not None and not selected_document_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selected document IDs are invalid or no longer available.",
+        )
+
+    scope_filter = _build_document_scope_filter(selected_document_ids)
+
     if retriever is None:
         try:
             load_db()
@@ -413,7 +575,7 @@ async def ask_question(request: QueryRequest):
                 detail="Document retrieval is unavailable.",
             ) from exc
 
-    if retriever is None:
+    if retriever is None and db is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No document uploaded yet.",
@@ -429,27 +591,73 @@ async def ask_question(request: QueryRequest):
             ) from exc
 
     try:
-        docs = retriever.invoke(query)
+        if db is not None and scope_filter is not None:
+            docs = db.similarity_search(query, k=3, filter=scope_filter)
+        elif db is not None and scope_filter is None:
+            docs = db.similarity_search(query, k=3)
+        else:
+            docs = retriever.invoke(query)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Retrieval failed before streaming started.",
         ) from exc
 
+    docs = _filter_documents_by_scope(docs, selected_document_ids)
+
     sources = []
     for doc in docs:
-        source_location = doc.metadata.get("page")
+        metadata = getattr(doc, "metadata", {}) or {}
+        source_location = metadata.get("page")
         if source_location is None:
-            source_location = doc.metadata.get("location", "unknown")
+            source_location = metadata.get("location", "unknown")
         sources.append({
             "page": source_location,
             "content": doc.page_content[:200],
+            "document_id": metadata.get("document_id"),
+            "filename": metadata.get("filename"),
         })
 
     if not docs:
         async def empty_gen():
             yield f"data: {json.dumps({'answer': 'No relevant information found.', 'sources': []})}\n\n"
         return StreamingResponse(empty_gen(), media_type="text/event-stream")
+
+    if is_summary_question(query):
+        context = "\n\n".join([doc.page_content for doc in docs])
+        summary_prompt = f"""
+        You are a helpful research assistant summarizing the selected document(s).
+        Provide a concise but useful overview of the key points and conclusions.
+        Use only the provided document context.
+        If the material is insufficient, say so.
+
+        Context:
+        {context}
+
+        Question: {query}
+
+        Final summary:
+        """
+
+        async def summary_generator():
+            yield f"data: {json.dumps({'sources': sources})}\n\n"
+            try:
+                if hasattr(llm, "invoke"):
+                    response = llm.invoke(summary_prompt)
+                    content = getattr(response, "content", str(response))
+                else:
+                    content = ""
+                    async for chunk in llm.astream(summary_prompt):
+                        if getattr(chunk, "content", None):
+                            content += chunk.content
+            except Exception as exc:
+                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'content': content})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(summary_generator(), media_type="text/event-stream")
 
     history = (request.history or [])[-10:]
     history_str = "\n".join([f"{m.role.capitalize()}: {m.content}" for m in history])

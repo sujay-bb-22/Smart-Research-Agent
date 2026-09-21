@@ -80,7 +80,8 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
   const [clearing, setClearing] = useState(false);
-  const [files, setFiles] = useState<{name: string, size: number, uploaded_at: number}[]>([]);
+  const [files, setFiles] = useState<{document_id?: string, name: string, size: number, uploaded_at: number}[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 🔹 Fetch files
@@ -95,6 +96,18 @@ export default function Home() {
       const data = await res.json();
       const fileList = Array.isArray(data?.files) ? data.files : Array.isArray(data) ? data : [];
       setFiles(fileList);
+
+      const currentDocumentIds = fileList
+        .map((entry: {document_id?: string}) => entry.document_id)
+        .filter((id): id is string => Boolean(id));
+
+      setSelectedDocumentIds((prev) => {
+        if (prev.length > 0) {
+          const validPrev = prev.filter((id) => currentDocumentIds.includes(id));
+          return validPrev.length > 0 ? validPrev : currentDocumentIds;
+        }
+        return currentDocumentIds;
+      });
     } catch (err) {
       console.error("Fetch files error:", err);
     }
@@ -215,7 +228,8 @@ export default function Home() {
         },
         body: JSON.stringify({ 
           question: userMessage.content,
-          history: messages.map(m => ({ role: m.role, content: m.content }))
+          history: messages.map(m => ({ role: m.role, content: m.content })),
+          selected_document_ids: selectedDocumentIds
         }),
       });
 
@@ -423,10 +437,26 @@ export default function Home() {
                   <div className="space-y-3">
                     {files.map((f, i) => (
                       <div key={i} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 group hover:border-blue-200 transition-all">
-                        <div className="flex-1 min-w-0 pr-2">
-                          <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
-                          <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
-                        </div>
+                        <label className="flex items-center flex-1 min-w-0 pr-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(f.document_id) && selectedDocumentIds.includes(f.document_id ?? "")}
+                            onChange={() => {
+                              if (!f.document_id) return;
+                              setSelectedDocumentIds((prev) => {
+                                if (prev.includes(f.document_id ?? "")) {
+                                  return prev.filter((id) => id !== f.document_id);
+                                }
+                                return [...prev, f.document_id ?? ""];
+                              });
+                            }}
+                            className="mr-3 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
+                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                          </div>
+                        </label>
                         <button 
                           onClick={() => deleteFile(f.name)}
                           className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
