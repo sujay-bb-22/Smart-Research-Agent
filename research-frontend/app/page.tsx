@@ -30,6 +30,42 @@ type Message = {
   error?: string;
 };
 
+type DocumentEntry = {
+  document_id?: string;
+  name: string;
+  size: number;
+  uploaded_at: number;
+};
+
+const isDocumentEntry = (value: unknown): value is DocumentEntry => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.name === "string" &&
+    typeof record.size === "number" &&
+    typeof record.uploaded_at === "number" &&
+    (record.document_id === undefined || typeof record.document_id === "string")
+  );
+};
+
+const normalizeFileList = (value: unknown): DocumentEntry[] => {
+  if (Array.isArray(value)) {
+    return value.filter(isDocumentEntry);
+  }
+
+  if (value && typeof value === "object") {
+    const candidate = value as { files?: unknown };
+    if (Array.isArray(candidate.files)) {
+      return candidate.files.filter(isDocumentEntry);
+    }
+  }
+
+  return [];
+};
+
 const SUPPORTED_FORMAT_MESSAGE = "Supported formats: PDF, DOCX.";
 
 const getErrorMessage = (payload: unknown, fallback: string) => {
@@ -80,7 +116,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
   const [clearing, setClearing] = useState(false);
-  const [files, setFiles] = useState<{document_id?: string, name: string, size: number, uploaded_at: number}[]>([]);
+  const [files, setFiles] = useState<DocumentEntry[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -94,12 +130,12 @@ export default function Home() {
       }
 
       const data = await res.json();
-      const fileList = Array.isArray(data?.files) ? data.files : Array.isArray(data) ? data : [];
+      const fileList: DocumentEntry[] = normalizeFileList(data);
       setFiles(fileList);
 
       const currentDocumentIds = fileList
-        .map((entry: {document_id?: string}) => entry.document_id)
-        .filter((id): id is string => Boolean(id));
+        .map((entry: DocumentEntry) => entry.document_id)
+        .filter((id: string | undefined): id is string => typeof id === "string" && id.length > 0);
 
       setSelectedDocumentIds((prev) => {
         if (prev.length > 0) {
