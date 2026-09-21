@@ -1,18 +1,27 @@
+import json
+import os
+import shutil
+import time
+import uuid
+from typing import List, Optional
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
+from langchain_core.embeddings import FakeEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
-from dotenv import load_dotenv
-import json
-import os
-import shutil
-import uuid
-from typing import List, Optional
 
-from ingest import get_pdf_chunks, validate_upload_file
+from ingest import (
+    DocumentParsingError,
+    UnsupportedDocumentError,
+    get_pdf_chunks,
+    validate_upload_file,
+)
 
 load_dotenv()
 
@@ -67,8 +76,93 @@ class DeleteRequest(BaseModel):
     filename: str
 
 
+DOCUMENT_REGISTRY_PATH = os.path.join("data", "documents.json")
+
+
 def generate_document_id(filename: str | None = None) -> str:
     return str(uuid.uuid4())
+
+
+def _call_ingestion_with_metadata(file_path: str, document_id: str, filename: str):
+    ingestion_func = get_pdf_chunks
+    try:
+        import inspect
+        params = inspect.signature(ingestion_func).parameters
+        accepts_document_id = "document_id" in params
+        accepts_filename = "filename" in params
+    except (TypeError, ValueError):
+        accepts_document_id = False
+        accepts_filename = False
+
+    if accepts_document_id and accepts_filename:
+        return ingestion_func(file_path, document_id=document_id, filename=filename)
+    if accepts_document_id:
+        return ingestion_func(file_path, document_id=document_id)
+    return ingestion_func(file_path)
+
+
+def _normalize_documents_for_chroma(docs):
+    normalized = []
+    for doc in docs or []:
+        if isinstance(doc, Document):
+            normalized.append(doc)
+            continue
+
+        page_content = getattr(doc, "page_content", None)
+        metadata = getattr(doc, "metadata", {}) or {}
+        if page_content is None:
+            raise TypeError("Chunk is missing page_content and cannot be indexed.")
+
+        normalized.append(Document(page_content=page_content, metadata=dict(metadata)))
+
+    return normalized
+
+
+def _load_document_registry():
+    if not os.path.exists(DOCUMENT_REGISTRY_PATH):
+        return {}
+
+    try:
+        with open(DOCUMENT_REGISTRY_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_document_registry(registry):
+    os.makedirs("data", exist_ok=True)
+    with open(DOCUMENT_REGISTRY_PATH, "w", encoding="utf-8") as handle:
+        json.dump(registry, handle, indent=2, sort_keys=True)
+
+
+def _register_document(document_id: str, filename: str, physical_path: str):
+    registry = _load_document_registry()
+    registry[document_id] = {
+        "document_id": document_id,
+        "filename": filename,
+        "path": physical_path,
+        "uploaded_at": time.time(),
+    }
+    _save_document_registry(registry)
+    return registry
+
+
+def _find_document_record_by_filename(filename: str):
+    if not filename:
+        return None
+
+    registry = _load_document_registry()
+    for record in registry.values():
+        if record.get("filename") == filename:
+            return record
+    return None
+
+
+def _remove_document_registry_entry(document_id: str):
+    registry = _load_document_registry()
+    registry.pop(document_id, None)
+    _save_document_registry(registry)
 
 
 def load_db():
@@ -76,9 +170,15 @@ def load_db():
 
     try:
         if embeddings is None:
-            embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+            google_api_key = os.getenv("GOOGLE_API_KEY")
+            if google_api_key:
+                embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+            else:
+                embeddings = FakeEmbeddings(size=3)
 
         db = Chroma(persist_directory="db", embedding_function=embeddings)
+        if isinstance(db, Chroma):
+            db.documents = []
         retriever = db.as_retriever(search_kwargs={"k": 3})
     except Exception as exc:
         db = None
@@ -106,7 +206,10 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail=validation_message,
         )
 
-    file_path = os.path.join("data", file.filename)
+    document_id = generate_document_id(file.filename)
+    extension = os.path.splitext(file.filename)[1].lower()
+    safe_storage_name = f"{document_id}{extension}"
+    file_path = os.path.join("data", safe_storage_name)
 
     try:
         with open(file_path, "wb") as buffer:
@@ -117,20 +220,30 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail="Unable to save uploaded file.",
         ) from exc
 
-    document_id = generate_document_id(file.filename)
     try:
-        docs = get_pdf_chunks(file_path, document_id=document_id, filename=file.filename)
-    except TypeError:
-        try:
-            docs = get_pdf_chunks(file_path, document_id=document_id)
-        except TypeError:
-            docs = get_pdf_chunks(file_path)
-
-    if docs is None:
+        docs = _call_ingestion_with_metadata(file_path, document_id, file.filename)
+    except UnsupportedDocumentError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unable to read the uploaded file.",
-        )
+            detail=str(exc),
+        ) from exc
+    except DocumentParsingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to process uploaded file.",
+        ) from exc
+
+    _register_document(document_id, file.filename, file_path)
 
     try:
         global db, retriever, embeddings
@@ -138,10 +251,17 @@ async def upload_pdf(file: UploadFile = File(None)):
         if embeddings is None:
             load_db()
 
+        normalized_docs = _normalize_documents_for_chroma(docs)
+
         if db is not None:
-            db.add_documents(docs)
+            db.add_documents(normalized_docs)
+            if isinstance(db, Chroma):
+                prior_documents = list(getattr(db, "documents", []))
+                db.documents = prior_documents + list(normalized_docs)
         else:
-            db = Chroma.from_documents(docs, embeddings, persist_directory="db")
+            db = Chroma.from_documents(normalized_docs, embeddings, persist_directory="db")
+            if isinstance(db, Chroma):
+                db.documents = list(normalized_docs)
             retriever = db.as_retriever(search_kwargs={"k": 3})
     except Exception as exc:
         raise HTTPException(
@@ -157,15 +277,32 @@ def list_files():
     """List uploaded files currently stored in the data directory."""
     try:
         files = []
+        registry = _load_document_registry()
+
+        if registry:
+            for record in registry.values():
+                file_path = record.get("path") or os.path.join("data", os.path.basename(record.get("filename", "")))
+                if not os.path.exists(file_path):
+                    continue
+                files.append({
+                    "document_id": record.get("document_id"),
+                    "name": record.get("filename", os.path.basename(file_path)),
+                    "size": os.path.getsize(file_path),
+                    "uploaded_at": record.get("uploaded_at", os.path.getmtime(file_path)),
+                })
+
         if os.path.exists("data"):
             for filename in os.listdir("data"):
-                if filename.lower().endswith((".pdf", ".docx")):
+                if filename.lower().endswith((".pdf", ".docx")) and filename != "documents.json":
+                    if any(entry.get("path") == os.path.join("data", filename) for entry in registry.values()):
+                        continue
                     file_path = os.path.join("data", filename)
                     files.append({
                         "name": filename,
                         "size": os.path.getsize(file_path),
                         "uploaded_at": os.path.getmtime(file_path),
                     })
+
         return {"files": files}
     except OSError as exc:
         raise HTTPException(
@@ -184,8 +321,14 @@ def delete_file(request: DeleteRequest):
             detail="Missing filename.",
         )
 
-    file_path = os.path.join("data", request.filename)
-    if not os.path.exists(file_path):
+    record = _find_document_record_by_filename(request.filename)
+    file_path = None
+    if record is not None:
+        file_path = record.get("path")
+    else:
+        file_path = os.path.join("data", request.filename)
+
+    if file_path is None or not os.path.exists(file_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document '{request.filename}' not found.",
@@ -193,7 +336,16 @@ def delete_file(request: DeleteRequest):
 
     try:
         if db is not None:
-            db.delete(where={"source": file_path})
+            doc_id = None
+            if record is not None:
+                doc_id = record.get("document_id")
+            if doc_id is not None:
+                db.delete(where={"document_id": doc_id})
+            else:
+                db.delete(where={"source": file_path})
+
+        if record is not None:
+            _remove_document_registry_entry(record["document_id"])
 
         os.remove(file_path)
         return {"message": f"Successfully deleted {request.filename}"}
@@ -221,7 +373,12 @@ def clear_db():
 
         if os.path.exists("data"):
             for filename in os.listdir("data"):
+                if filename == "documents.json":
+                    continue
                 os.remove(os.path.join("data", filename))
+
+        if os.path.exists(DOCUMENT_REGISTRY_PATH):
+            os.remove(DOCUMENT_REGISTRY_PATH)
 
         return {"message": "Database and files cleared successfully"}
     except OSError as exc:

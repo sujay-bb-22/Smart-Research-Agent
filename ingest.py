@@ -26,6 +26,18 @@ SUPPORTED_EXTENSIONS = {
 SUPPORTED_FORMAT_MESSAGE = "Supported formats: PDF, DOCX."
 
 
+class IngestionError(RuntimeError):
+    """Base ingestion exception for upload processing failures."""
+
+
+class UnsupportedDocumentError(ValueError, IngestionError):
+    """Raised when a file is invalid or unsupported for the application."""
+
+
+class DocumentParsingError(IngestionError):
+    """Raised when a supported document cannot be parsed or read."""
+
+
 def validate_upload_file(filename: str, mime_type: str | None = None):
     if not filename:
         return False, "No file selected. " + SUPPORTED_FORMAT_MESSAGE
@@ -48,17 +60,21 @@ def detect_document_loader(filename: str):
         return "pdf"
     if extension == ".docx":
         return "docx"
-    raise ValueError("Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE)
+    raise UnsupportedDocumentError("Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE)
 
 
 def load_docx_documents(docx_path: str):
     try:
         with zipfile.ZipFile(docx_path) as archive:
             content = archive.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as exc:
-        raise ValueError(f"Unable to read DOCX file: {exc}") from exc
+    except (zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise DocumentParsingError(f"Unable to read DOCX file: {exc}") from exc
 
-    root = ET.fromstring(content)
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as exc:
+        raise DocumentParsingError(f"Unable to parse DOCX XML: {exc}") from exc
+
     namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 
     paragraphs = []
@@ -72,7 +88,7 @@ def load_docx_documents(docx_path: str):
             paragraphs.append(paragraph_text)
 
     if not paragraphs:
-        raise ValueError("No readable content found in DOCX file")
+        raise DocumentParsingError("No readable content found in DOCX file")
 
     return [
         Document(
@@ -83,52 +99,46 @@ def load_docx_documents(docx_path: str):
 
 
 def get_pdf_chunks(pdf_path, document_id=None, filename=None):
+    if document_id is None:
+        raise ValueError("document_id is required for chunk metadata and indexing")
+
+    file_name = filename or os.path.basename(pdf_path)
+    file_type = detect_document_loader(pdf_path)
+
     try:
-        print(f"📄 Starting ingestion for: {pdf_path}")
-
-        if document_id is None:
-            document_id = str(uuid.uuid4())
-
-        file_name = filename or os.path.basename(pdf_path)
-        file_type = detect_document_loader(pdf_path)
-
         if file_type == "pdf":
             loader = PyMuPDFLoader(pdf_path)
             documents = loader.load()
         elif file_type == "docx":
             documents = load_docx_documents(pdf_path)
         else:
-            raise ValueError("Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE)
+            raise UnsupportedDocumentError("Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE)
+    except IngestionError:
+        raise
+    except Exception as exc:
+        raise DocumentParsingError(f"Unable to read the uploaded document: {exc}") from exc
 
-        if not documents:
-            raise ValueError("No content extracted from uploaded document")
+    if not documents:
+        raise DocumentParsingError("No content extracted from uploaded document")
 
-        print(f"📑 Loaded {len(documents)} document block(s)")
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50,
+    )
+    docs = splitter.split_documents(documents)
+    for index, doc in enumerate(docs, start=1):
+        if doc.metadata is None:
+            doc.metadata = {}
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-        )
-        docs = splitter.split_documents(documents)
-        for index, doc in enumerate(docs, start=1):
-            if doc.metadata is None:
-                doc.metadata = {}
+        metadata = dict(doc.metadata)
+        metadata["document_id"] = document_id
+        metadata["filename"] = file_name
+        metadata["source"] = metadata.get("source") or pdf_path
+        metadata["chunk_id"] = f"{document_id}-chunk-{index:03d}"
 
-            metadata = dict(doc.metadata)
-            metadata["document_id"] = document_id
-            metadata["filename"] = file_name
-            metadata["source"] = metadata.get("source") or pdf_path
-            metadata["chunk_id"] = f"{document_id}-chunk-{index:03d}"
+        if "page" not in metadata and "location" not in metadata:
+            metadata["location"] = "document-body"
 
-            if "page" not in metadata and "location" not in metadata:
-                metadata["location"] = "document-body"
+        doc.metadata = metadata
 
-            doc.metadata = metadata
-
-        print(f"✂️ Split into {len(docs)} chunks")
-
-        return docs
-
-    except Exception as e:
-        print(f"❌ Error during ingestion: {e}")
-        return None
+    return docs
