@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -254,16 +255,29 @@ def _save_document_registry(registry):
         json.dump(registry, handle, indent=2, sort_keys=True)
 
 
-def _register_document(document_id: str, filename: str, physical_path: str):
+def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "processed", duplicate_of: str | None = None):
     registry = _load_document_registry()
     registry[document_id] = {
         "document_id": document_id,
         "filename": filename,
         "path": physical_path,
         "uploaded_at": time.time(),
+        "sha256": file_hash,
+        "status": status,
+        "duplicate_of": duplicate_of,
     }
     _save_document_registry(registry)
     return registry
+
+
+def _find_duplicate_document(file_hash: str | None):
+    if not file_hash:
+        return None
+    registry = _load_document_registry()
+    for record in registry.values():
+        if record.get("sha256") == file_hash:
+            return record
+    return None
 
 
 def _find_document_record_by_filename(filename: str):
@@ -340,13 +354,6 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail="Invalid file name.",
         )
 
-    is_valid, validation_message = validate_upload_file(sanitized_filename, file.content_type)
-    if not is_valid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=validation_message,
-        )
-
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(
@@ -358,6 +365,16 @@ async def upload_pdf(file: UploadFile = File(None)):
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Uploaded file exceeds the maximum size of {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
         )
+
+    is_valid, validation_message = validate_upload_file(sanitized_filename, file.content_type, file_bytes)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=validation_message,
+        )
+
+    file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    duplicate_record = _find_duplicate_document(file_sha256)
 
     document_id = generate_document_id(file.filename)
     extension = os.path.splitext(sanitized_filename)[1].lower()
@@ -396,7 +413,14 @@ async def upload_pdf(file: UploadFile = File(None)):
             detail="Unable to process uploaded file.",
         ) from exc
 
-    _register_document(document_id, file.filename, file_path)
+    _register_document(
+        document_id,
+        file.filename,
+        file_path,
+        file_hash=file_sha256,
+        status="processed",
+        duplicate_of=duplicate_record.get("document_id") if duplicate_record else None,
+    )
 
     try:
         global db, retriever, embeddings

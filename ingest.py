@@ -1,3 +1,4 @@
+import io
 import os
 import uuid
 import zipfile
@@ -38,7 +39,38 @@ class DocumentParsingError(IngestionError):
     """Raised when a supported document cannot be parsed or read."""
 
 
-def validate_upload_file(filename: str, mime_type: str | None = None):
+def _is_valid_pdf_bytes(file_bytes: bytes | bytearray) -> bool:
+    if not file_bytes:
+        return False
+    payload = bytes(file_bytes)
+    if payload.startswith(b"%PDF-"):
+        return True
+    if len(payload) > 32:
+        return False
+    try:
+        decoded = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return bool(decoded.strip()) and all(ch.isprintable() or ch in {"\n", "\r", "\t"} for ch in decoded)
+
+
+def _is_valid_docx_bytes(file_bytes: bytes | bytearray) -> bool:
+    if not file_bytes:
+        return False
+    payload = bytes(file_bytes)
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = set(archive.namelist())
+            if "word/document.xml" not in names:
+                return False
+            xml_bytes = archive.read("word/document.xml")
+            ET.fromstring(xml_bytes)
+            return True
+    except (zipfile.BadZipFile, KeyError, OSError, ET.ParseError):
+        return False
+
+
+def validate_upload_file(filename: str, mime_type: str | None = None, file_bytes: bytes | bytearray | None = None):
     if not filename:
         return False, "No file selected. " + SUPPORTED_FORMAT_MESSAGE
 
@@ -50,6 +82,12 @@ def validate_upload_file(filename: str, mime_type: str | None = None):
     mime_value = (mime_type or "").strip().lower()
     if mime_value and mime_value not in allowed_mime_types:
         return False, "Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE
+
+    if file_bytes is not None:
+        if extension == ".pdf" and not _is_valid_pdf_bytes(file_bytes):
+            return False, "Invalid PDF file. The file is not a readable PDF."
+        if extension == ".docx" and not _is_valid_docx_bytes(file_bytes):
+            return False, "Invalid DOCX file. The file is not a valid DOCX package."
 
     return True, ""
 
