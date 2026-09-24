@@ -4,25 +4,27 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import os
 
+from config import settings
+
 load_dotenv()
 
 # Embeddings
 embeddings = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2"
+    model_name=settings.embedding_model
 )
 
 # Load DB
 db = Chroma(
-    persist_directory="db",
+    persist_directory=settings.vector_store_path,
     embedding_function=embeddings
 )
 
-retriever = db.as_retriever(search_kwargs={"k": 3})
+retriever = db.as_retriever(search_kwargs={"k": settings.default_k})
 
 # Groq LLM
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
-    model_name="openai/gpt-oss-20b"
+    model_name=settings.model
 )
 
 # Input

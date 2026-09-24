@@ -14,6 +14,18 @@ def test_validate_selected_document_ids_rejects_unknown_ids():
     assert valid == ["doc-a"]
 
 
+def test_validate_selected_document_ids_rejects_non_completed_statuses():
+    known = {
+        "doc-a": {"document_id": "doc-a", "status": "processing"},
+        "doc-b": {"document_id": "doc-b", "status": "completed"},
+        "doc-c": {"document_id": "doc-c", "status": "failed"},
+    }
+
+    valid = main.validate_selected_document_ids(["doc-a", "doc-b", "doc-c"], known)
+
+    assert valid == ["doc-b"]
+
+
 def test_summary_question_detection():
     assert main.is_summary_question("Summarize this document for me") is True
     assert main.is_summary_question("What is the main conclusion?") is True

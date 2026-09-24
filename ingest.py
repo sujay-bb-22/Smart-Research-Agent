@@ -4,6 +4,7 @@ import uuid
 import zipfile
 from xml.etree import ElementTree as ET
 
+from config import settings
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -160,8 +161,8 @@ def get_pdf_chunks(pdf_path, document_id=None, filename=None):
         raise DocumentParsingError("No content extracted from uploaded document")
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
     )
     docs = splitter.split_documents(documents)
     for index, doc in enumerate(docs, start=1):

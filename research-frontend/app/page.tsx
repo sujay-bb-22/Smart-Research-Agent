@@ -35,6 +35,7 @@ type DocumentEntry = {
   name: string;
   size: number;
   uploaded_at: number;
+  status?: "pending" | "processing" | "completed" | "failed" | "duplicate";
 };
 
 const isDocumentEntry = (value: unknown): value is DocumentEntry => {
@@ -477,8 +478,10 @@ export default function Home() {
                           <input
                             type="checkbox"
                             checked={Boolean(f.document_id) && selectedDocumentIds.includes(f.document_id ?? "")}
+                            disabled={!f.document_id || (f.status ?? 'completed') !== 'completed'}
                             onChange={() => {
                               if (!f.document_id) return;
+                              if ((f.status ?? 'completed') !== 'completed') return;
                               setSelectedDocumentIds((prev) => {
                                 if (prev.includes(f.document_id ?? "")) {
                                   return prev.filter((id) => id !== f.document_id);
@@ -486,11 +489,22 @@ export default function Home() {
                                 return [...prev, f.document_id ?? ""];
                               });
                             }}
-                            className="mr-3 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            className="mr-3 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                           />
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
                             <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                            <div className="mt-1">
+                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                                f.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                f.status === 'processing' ? 'bg-amber-100 text-amber-700' :
+                                f.status === 'failed' ? 'bg-red-100 text-red-700' :
+                                f.status === 'duplicate' ? 'bg-blue-100 text-blue-700' :
+                                'bg-slate-100 text-slate-600'}
+                              `}>
+                                {f.status ?? 'pending'}
+                              </span>
+                            </div>
                           </div>
                         </label>
                         <button 
