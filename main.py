@@ -430,7 +430,37 @@ def _normalize_document_status(value):
     return status if status in {"pending", "processing", "completed", "failed"} else "completed"
 
 
-def validate_selected_document_ids(selected_document_ids, registry=None):
+def _get_user_workspace_context(request=None, user_id=None, workspace_id=None, default_if_missing=True):
+    if request is not None:
+        request_user_id = request.headers.get("x-user-id") or request.headers.get("X-User-ID")
+        request_workspace_id = request.headers.get("x-workspace-id") or request.headers.get("X-Workspace-ID")
+        if request_user_id is not None:
+            user_id = request_user_id
+        if request_workspace_id is not None:
+            workspace_id = request_workspace_id
+
+    if user_id is None and workspace_id is None and not default_if_missing:
+        return None, None
+
+    user_id = user_id or settings.default_user_id
+    workspace_id = workspace_id or settings.default_workspace_id
+    return user_id, workspace_id
+
+
+def _build_user_workspace_filter(user_id=None, workspace_id=None):
+    filters = []
+    if user_id is not None:
+        filters.append({"user_id": str(user_id)})
+    if workspace_id is not None:
+        filters.append({"workspace_id": str(workspace_id)})
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"$and": filters}
+
+
+def validate_selected_document_ids(selected_document_ids, registry=None, user_id=None, workspace_id=None):
     if not selected_document_ids:
         return []
 
@@ -443,6 +473,7 @@ def validate_selected_document_ids(selected_document_ids, registry=None):
         registry_snapshot = _load_document_registry()
 
     known_registry_ids = set(registry_snapshot.keys()) if isinstance(registry_snapshot, dict) else set()
+    user_scope = _build_user_workspace_filter(user_id, workspace_id)
 
     for document_id in selected_document_ids:
         if document_id is None:
@@ -460,6 +491,25 @@ def validate_selected_document_ids(selected_document_ids, registry=None):
                 continue
             if _normalize_document_status(record.get("status")) != "completed":
                 continue
+            if user_scope is not None:
+                matches = True
+                if "$and" in user_scope:
+                    for clause in user_scope["$and"]:
+                        for key, expected in clause.items():
+                            actual = record.get(key)
+                            if actual not in {None, expected}:
+                                matches = False
+                                break
+                        if not matches:
+                            break
+                else:
+                    for key, expected in user_scope.items():
+                        actual = record.get(key)
+                        if actual not in {None, expected}:
+                            matches = False
+                            break
+                if not matches:
+                    continue
 
         valid_ids.append(candidate)
         seen.add(candidate)
@@ -470,26 +520,36 @@ def validate_selected_document_ids(selected_document_ids, registry=None):
     return valid_ids
 
 
-def _build_document_scope_filter(selected_document_ids):
-    valid_ids = validate_selected_document_ids(selected_document_ids)
-    if not valid_ids:
+def _build_document_scope_filter(selected_document_ids, user_id=None, workspace_id=None):
+    valid_ids = validate_selected_document_ids(selected_document_ids, user_id=user_id, workspace_id=workspace_id)
+    generated_scope = _build_user_workspace_filter(user_id, workspace_id)
+    filters = []
+    if valid_ids:
+        filters.append({"document_id": {"$in": valid_ids}})
+    if generated_scope is not None:
+        filters.append(generated_scope)
+    if not filters:
         return None
-    return {"document_id": {"$in": valid_ids}}
+    if len(filters) == 1:
+        return filters[0]
+    return {"$and": filters}
 
 
-def _filter_documents_by_scope(documents, selected_document_ids):
-    if not selected_document_ids:
+def _filter_documents_by_scope(documents, selected_document_ids, user_id=None, workspace_id=None):
+    if not selected_document_ids and user_id is None and workspace_id is None:
         return documents or []
 
-    valid_ids = set(validate_selected_document_ids(selected_document_ids))
-    if not valid_ids:
-        return []
-
+    valid_ids = set(validate_selected_document_ids(selected_document_ids, user_id=user_id, workspace_id=workspace_id))
     filtered = []
     for doc in documents or []:
         metadata = getattr(doc, "metadata", {}) or {}
-        if metadata.get("document_id") in valid_ids:
-            filtered.append(doc)
+        if selected_document_ids is not None and metadata.get("document_id") not in valid_ids:
+            continue
+        if user_id is not None and metadata.get("user_id") not in {None, user_id}:
+            continue
+        if workspace_id is not None and metadata.get("workspace_id") not in {None, workspace_id}:
+            continue
+        filtered.append(doc)
     return filtered
 
 
@@ -546,7 +606,7 @@ def _save_document_registry(registry):
         json.dump(registry, handle, indent=2, sort_keys=True)
 
 
-def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "processed", duplicate_of: str | None = None):
+def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "processed", duplicate_of: str | None = None, user_id: str | None = None, workspace_id: str | None = None):
     registry = _load_document_registry()
     registry[document_id] = {
         "document_id": document_id,
@@ -556,28 +616,38 @@ def _register_document(document_id: str, filename: str, physical_path: str, file
         "sha256": file_hash,
         "status": status,
         "duplicate_of": duplicate_of,
+        "user_id": user_id or settings.default_user_id,
+        "workspace_id": workspace_id or settings.default_workspace_id,
     }
     _save_document_registry(registry)
     return registry
 
 
-def _find_duplicate_document(file_hash: str | None):
+def _find_duplicate_document(file_hash: str | None, user_id: str | None = None, workspace_id: str | None = None):
     if not file_hash:
         return None
     registry = _load_document_registry()
     for record in registry.values():
         if record.get("sha256") == file_hash:
+            if user_id is not None and record.get("user_id") not in {None, user_id}:
+                continue
+            if workspace_id is not None and record.get("workspace_id") not in {None, workspace_id}:
+                continue
             return record
     return None
 
 
-def _find_document_record_by_filename(filename: str):
+def _find_document_record_by_filename(filename: str, user_id: str | None = None, workspace_id: str | None = None):
     if not filename:
         return None
 
     registry = _load_document_registry()
     for record in registry.values():
         if record.get("filename") == filename:
+            if user_id is not None and record.get("user_id") not in {None, user_id}:
+                continue
+            if workspace_id is not None and record.get("workspace_id") not in {None, workspace_id}:
+                continue
             return record
     return None
 
@@ -641,13 +711,14 @@ def readiness_check():
 
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(None)):
+async def upload_pdf(request: Request, file: UploadFile = File(None)):
     if file is None or file.filename is None or not file.filename.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No file selected. Supported formats: PDF, DOCX.",
         )
 
+    user_id, workspace_id = _get_user_workspace_context(request)
     sanitized_filename = sanitize_filename(file.filename)
     if not sanitized_filename:
         raise HTTPException(
@@ -675,7 +746,7 @@ async def upload_pdf(file: UploadFile = File(None)):
         )
 
     file_sha256 = hashlib.sha256(file_bytes).hexdigest()
-    duplicate_record = _find_duplicate_document(file_sha256)
+    duplicate_record = _find_duplicate_document(file_sha256, user_id=user_id, workspace_id=workspace_id)
     if duplicate_record and duplicate_record.get("document_id"):
         duplicate_id = duplicate_record.get("document_id")
         return {
@@ -698,6 +769,8 @@ async def upload_pdf(file: UploadFile = File(None)):
         file_hash=file_sha256,
         status="processing",
         duplicate_of=None,
+        user_id=user_id,
+        workspace_id=workspace_id,
     )
 
     try:
@@ -771,37 +844,46 @@ async def upload_pdf(file: UploadFile = File(None)):
 
 
 @app.get("/files")
-def list_files():
+def list_files(request: Request):
     """List uploaded files currently stored in the data directory."""
     try:
+        user_id, workspace_id = _get_user_workspace_context(request, default_if_missing=False)
         files = []
         registry = _load_document_registry()
 
+        if user_id is None and workspace_id is None:
+            if os.path.exists("data"):
+                for filename in sorted(os.listdir("data")):
+                    lowered = filename.lower()
+                    if lowered.endswith((".pdf", ".docx")):
+                        file_path = os.path.join("data", filename)
+                        files.append({
+                            "document_id": None,
+                            "name": filename,
+                            "size": os.path.getsize(file_path),
+                            "uploaded_at": os.path.getmtime(file_path),
+                            "status": "completed",
+                        })
+            return {"files": files}
+
         if registry:
             for record in registry.values():
-                file_path = record.get("path") or os.path.join("data", os.path.basename(record.get("filename", "")))
-                if not os.path.exists(file_path):
+                if record.get("user_id") not in {None, user_id} or record.get("workspace_id") not in {None, workspace_id}:
                     continue
+                file_path = record.get("path") or os.path.join("data", os.path.basename(record.get("filename", "")))
+                if file_path and os.path.exists(file_path):
+                    size = os.path.getsize(file_path)
+                    uploaded_at = record.get("uploaded_at", os.path.getmtime(file_path))
+                else:
+                    size = 0
+                    uploaded_at = record.get("uploaded_at", time.time())
                 files.append({
                     "document_id": record.get("document_id"),
                     "name": record.get("filename", os.path.basename(file_path)),
-                    "size": os.path.getsize(file_path),
-                    "uploaded_at": record.get("uploaded_at", os.path.getmtime(file_path)),
+                    "size": size,
+                    "uploaded_at": uploaded_at,
                     "status": _normalize_document_status(record.get("status")),
                 })
-
-        if os.path.exists("data"):
-            for filename in os.listdir("data"):
-                if filename.lower().endswith((".pdf", ".docx")) and filename != "documents.json":
-                    if any(entry.get("path") == os.path.join("data", filename) for entry in registry.values()):
-                        continue
-                    file_path = os.path.join("data", filename)
-                    files.append({
-                        "name": filename,
-                        "size": os.path.getsize(file_path),
-                        "uploaded_at": os.path.getmtime(file_path),
-                        "status": "pending",
-                    })
 
         return {"files": files}
     except OSError as exc:
@@ -829,7 +911,7 @@ def get_document_status(document_id: str):
 
 
 @app.post("/delete_file")
-def delete_file(request: DeleteRequest):
+def delete_file(request: DeleteRequest, user_id: str | None = None, workspace_id: str | None = None):
     global db
 
     if not request.filename:
@@ -838,7 +920,8 @@ def delete_file(request: DeleteRequest):
             detail="Missing filename.",
         )
 
-    record = _find_document_record_by_filename(request.filename)
+    user_id, workspace_id = _get_user_workspace_context(user_id=user_id, workspace_id=workspace_id)
+    record = _find_document_record_by_filename(request.filename, user_id=user_id, workspace_id=workspace_id)
     file_path = None
     if record is not None:
         file_path = record.get("path")
@@ -857,9 +940,9 @@ def delete_file(request: DeleteRequest):
             if record is not None:
                 doc_id = record.get("document_id")
             if doc_id is not None:
-                db.delete(where={"document_id": doc_id})
+                db.delete(where={"document_id": doc_id, "user_id": user_id, "workspace_id": workspace_id})
             else:
-                db.delete(where={"source": file_path})
+                db.delete(where={"source": file_path, "user_id": user_id, "workspace_id": workspace_id})
 
         if record is not None:
             _remove_document_registry_entry(record["document_id"])
@@ -879,23 +962,35 @@ def delete_file(request: DeleteRequest):
 
 
 @app.post("/clear")
-def clear_db():
+def clear_db(request: Request):
     global db, retriever
 
     try:
+        user_id, workspace_id = _get_user_workspace_context(request, default_if_missing=False)
         if db is not None:
-            db.delete_collection()
+            if user_id is None and workspace_id is None:
+                db.delete_collection()
+            else:
+                db.delete(where={"user_id": user_id, "workspace_id": workspace_id})
             db = None
             retriever = None
+
+        registry = _load_document_registry()
+        if user_id is None and workspace_id is None:
+            registry.clear()
+        else:
+            for document_id, record in list(registry.items()):
+                if record.get("user_id") == user_id and record.get("workspace_id") == workspace_id:
+                    registry.pop(document_id, None)
+        _save_document_registry(registry)
 
         if os.path.exists("data"):
             for filename in os.listdir("data"):
                 if filename == "documents.json":
                     continue
-                os.remove(os.path.join("data", filename))
-
-        if os.path.exists(DOCUMENT_REGISTRY_PATH):
-            os.remove(DOCUMENT_REGISTRY_PATH)
+                file_path = os.path.join("data", filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
 
         return {"message": "Database and files cleared successfully"}
     except OSError as exc:
@@ -911,19 +1006,20 @@ def clear_db():
 
 
 @app.post("/ask")
-async def ask_question(request: QueryRequest):
+async def ask_question(http_request: Request, payload: QueryRequest):
     global retriever
 
-    query = (request.question or "").strip()
+    user_id, workspace_id = _get_user_workspace_context(http_request, default_if_missing=False)
+    query = (payload.question or "").strip()
     if not query:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Question is empty.",
         )
 
-    rewritten_query = rewrite_follow_up_question(query, request.history or [])
+    rewritten_query = rewrite_follow_up_question(query, payload.history or [])
     registry = _load_document_registry()
-    requested_ids = request.selected_document_ids or []
+    requested_ids = payload.selected_document_ids or []
 
     for document_id in requested_ids:
         if document_id is None:
@@ -932,23 +1028,33 @@ async def ask_question(request: QueryRequest):
         if not candidate:
             continue
         record = registry.get(candidate)
+        if user_id is not None and record and record.get("user_id") not in {None, user_id}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document does not belong to the current user and workspace.",
+            )
+        if workspace_id is not None and record and record.get("workspace_id") not in {None, workspace_id}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document does not belong to the current user and workspace.",
+            )
         if record and _normalize_document_status(record.get("status")) != "completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Document '{candidate}' is still {record.get('status', 'processing')} and cannot be queried yet.",
             )
 
-    selected_document_ids = validate_selected_document_ids(requested_ids)
-    if request.selected_document_ids is not None and not selected_document_ids:
+    selected_document_ids = validate_selected_document_ids(requested_ids, user_id=user_id, workspace_id=workspace_id)
+    if payload.selected_document_ids is not None and not selected_document_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Selected document IDs are invalid or no longer available.",
         )
 
-    effective_top_k = validate_top_k(request.top_k)
-    effective_threshold = validate_relevance_threshold(request.relevance_threshold)
+    effective_top_k = validate_top_k(payload.top_k)
+    effective_threshold = validate_relevance_threshold(payload.relevance_threshold)
 
-    scope_filter = _build_document_scope_filter(selected_document_ids)
+    scope_filter = _build_document_scope_filter(selected_document_ids, user_id=user_id, workspace_id=workspace_id)
 
     if retriever is None:
         try:
@@ -986,7 +1092,7 @@ async def ask_question(request: QueryRequest):
             detail="Retrieval failed before streaming started.",
         ) from exc
 
-    docs = _filter_documents_by_scope(docs, selected_document_ids)
+    docs = _filter_documents_by_scope(docs, selected_document_ids, user_id=user_id, workspace_id=workspace_id)
     filtered_documents = []
     for doc in docs:
         metadata = getattr(doc, "metadata", {}) or {}
@@ -1010,6 +1116,11 @@ async def ask_question(request: QueryRequest):
         if score is not None:
             metadata["score"] = float(score)
             doc.metadata = metadata
+
+        if not metadata.get("user_id") and user_id is not None:
+            metadata["user_id"] = user_id
+        if not metadata.get("workspace_id") and workspace_id is not None:
+            metadata["workspace_id"] = workspace_id
 
         filtered_documents.append(doc)
 
@@ -1038,7 +1149,7 @@ async def ask_question(request: QueryRequest):
         summary_prompt = build_answer_prompt(
             question=query,
             context=context,
-            history=(request.history or [])[-10:],
+            history=(payload.history or [])[-10:],
         )
 
         async def summary_generator():
@@ -1061,7 +1172,7 @@ async def ask_question(request: QueryRequest):
 
         return StreamingResponse(summary_generator(), media_type="text/event-stream")
 
-    history = (request.history or [])[-10:]
+    history = (payload.history or [])[-10:]
     context = "\n\n".join([doc.page_content for doc in docs])
     prompt = build_answer_prompt(query, context, history)
 
