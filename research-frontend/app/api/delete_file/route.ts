@@ -1,3 +1,5 @@
+import { backendError, backendHeaders } from "../../lib/backend";
+
 export async function POST(req: Request) {
     try {
         const body = await req.json();
@@ -5,21 +7,18 @@ export async function POST(req: Request) {
 
         const res = await fetch(`${BACKEND_URL}/delete_file`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
+            headers: backendHeaders(req, "application/json"),
             body: JSON.stringify(body),
         });
 
         if (!res.ok) {
-            const errorText = await res.text();
-            return Response.json({ error: "Failed to delete file", detail: errorText }, { status: res.status });
+            return backendError(res, "Unable to delete the document.");
         }
 
         const data = await res.json();
         return Response.json(data);
     } catch (error) {
-        console.error("❌ Delete proxy failed:", error);
-        return Response.json({ error: "Delete proxy failed" }, { status: 500 });
+        console.error("Delete proxy failed", error);
+        return Response.json({ error: { code: "DELETE_PROXY_ERROR", message: "Unable to delete the document." } }, { status: 502 });
     }
 }

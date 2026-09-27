@@ -10,17 +10,18 @@ import {
   Plus,
   Library,
   Database,
-  BookOpen,
   Cpu,
   MessageSquare,
   ChevronRight,
 } from "lucide-react";
-// 🔹 Dynamic imports for browser-only libraries to prevent SSR crashes
+import { clearConversation, loadConversation, saveConversation } from "./lib/conversation";
+import { readSseStream, type StreamEvent } from "./lib/sse";
+import { SourceCitations, type Citation } from "./components/SourceCitations";
 
 type Source = {
   page: number | string;
   content: string;
-};
+} & Omit<Citation, "page" | "content">;
 
 type Message = {
   role: "user" | "assistant";
@@ -75,6 +76,10 @@ const getErrorMessage = (payload: unknown, fallback: string) => {
   const data = payload as Record<string, unknown>;
   if (typeof data.detail === "string" && data.detail.trim()) return data.detail.trim();
   if (typeof data.error === "string" && data.error.trim()) return data.error.trim();
+  if (data.error && typeof data.error === "object") {
+    const error = data.error as Record<string, unknown>;
+    if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+  }
   if (typeof data.message === "string" && data.message.trim()) return data.message.trim();
 
   return fallback;
@@ -120,6 +125,8 @@ export default function Home() {
   const [files, setFiles] = useState<DocumentEntry[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const hasHydratedConversation = useRef(false);
 
   // 🔹 Fetch files
   const fetchFiles = async () => {
@@ -208,11 +215,19 @@ export default function Home() {
 
   useEffect(() => {
     fetchFiles();
+    setMessages(loadConversation() as Message[]);
+    hasHydratedConversation.current = true;
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (hasHydratedConversation.current) saveConversation(messages);
+  }, [messages]);
+
+  useEffect(() => () => abortControllerRef.current?.abort(), []);
 
   // 🔹 Format File Size
   const formatFileSize = (bytes: number) => {
@@ -256,6 +271,9 @@ export default function Home() {
     setMessages((prev) => [...prev, userMessage]);
     setQuestion("");
     setLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = controller;
 
     try {
       const res = await fetch("/api/ask", {
@@ -268,57 +286,41 @@ export default function Home() {
           history: messages.map(m => ({ role: m.role, content: m.content })),
           selected_document_ids: selectedDocumentIds
         }),
+        signal: controller.signal,
       });
 
-      if (!res.ok) throw new Error("Failed to fetch");
-
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
-      
-      // Add an empty assistant message that we'll update
-      setMessages((prev) => [...prev, { role: "assistant", content: "", sources: [] }]);
-
-      while (reader) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const dataStr = line.slice(6).trim();
-            if (!dataStr || dataStr === "[DONE]") continue;
-
-            try {
-              const data = JSON.parse(dataStr);
-              setMessages((prev) => {
-                const newMessages = [...prev];
-                const lastMsg = newMessages[newMessages.length - 1];
-                
-                if (data.sources) lastMsg.sources = data.sources;
-                if (data.suggestions) lastMsg.suggestions = data.suggestions;
-                if (data.content) lastMsg.content += data.content;
-                if (data.answer) lastMsg.content = data.answer;
-                if (data.error) lastMsg.error = data.error;
-                
-                return newMessages;
-              });
-            } catch (e) {
-              console.error("Error parsing stream chunk:", e);
-            }
-          }
-        }
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(getErrorMessage(payload, "Unable to retrieve an answer."));
       }
+      
+      setMessages((prev) => [...prev, { role: "assistant", content: "", sources: [] }]);
+      await readSseStream(res, (data: StreamEvent) => {
+        setMessages((prev) => {
+          const newMessages = [...prev];
+          const lastMsg = newMessages.at(-1);
+          if (!lastMsg || lastMsg.role !== "assistant") return prev;
+
+          if (Array.isArray(data.sources)) lastMsg.sources = data.sources as Source[];
+          if (Array.isArray(data.suggestions)) lastMsg.suggestions = data.suggestions;
+          if (data.content) lastMsg.content += data.content;
+          if (data.answer) lastMsg.content = data.answer;
+          if (data.error) lastMsg.error = data.error;
+          return newMessages;
+        });
+      }, controller.signal);
     } catch (error) {
-      console.error(error);
+      if (error instanceof DOMException && error.name === "AbortError") return;
       setMessages((prev) => [...prev, {
         role: "assistant",
         content: "",
-        error: "Error fetching answer. Please try again."
+        error: error instanceof Error ? error.message : "Error fetching answer. Please try again."
       }]);
     } finally {
-      setLoading(false);
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -337,6 +339,7 @@ export default function Home() {
 
       setUploadStatus("🧹 Database cleared!");
       setMessages([]);
+      clearConversation();
       await fetchFiles();
     } catch (err) {
       console.error(err);
@@ -567,28 +570,7 @@ export default function Home() {
                              </ReactMarkdown>
                           </div>
 
-                          {msg.sources && msg.sources.length > 0 && (
-                            <div className="mt-6 bg-gray-50 p-5 rounded-xl border border-gray-100">
-                              <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4 flex items-center">
-                                <BookOpen className="w-4 h-4 mr-2" />
-                                Sources Consulted
-                              </h3>
-
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-72 overflow-y-auto pr-2">
-                                {msg.sources.map((s, i) => (
-                                  <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 text-sm hover:border-blue-300 transition-all shadow-sm group relative">
-                                    <div className="flex justify-between items-center mb-2">
-                                      <span className="inline-block bg-blue-50 text-blue-700 text-xs font-bold px-2 py-1 rounded-lg">
-                                        Page {s.page}
-                                      </span>
-                                      <button onClick={() => copyToClipboard(s.content)} className="text-gray-300 hover:text-blue-500 transition-colors opacity-0 group-hover:opacity-100"><Copy className="w-3 h-3" /></button>
-                                    </div>
-                                    <span className="text-gray-600 leading-relaxed italic border-l-2 border-gray-100 pl-3 block line-clamp-4 group-hover:text-gray-900 transition-colors">&ldquo;{s.content}...&rdquo;</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
+                          {msg.sources && msg.sources.length > 0 && <SourceCitations citations={msg.sources} onCopy={copyToClipboard} />}
 
                           {msg.suggestions && msg.suggestions.length > 0 && (
                             <div className="mt-6">

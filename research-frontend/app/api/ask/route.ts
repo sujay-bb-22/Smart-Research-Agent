@@ -1,3 +1,5 @@
+import { backendError, backendHeaders } from "../../lib/backend";
+
 export async function POST(req: Request) {
     try {
         const body = await req.json();
@@ -5,15 +7,12 @@ export async function POST(req: Request) {
 
         const res = await fetch(`${BACKEND_URL}/ask`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
+            headers: backendHeaders(req, "application/json"),
             body: JSON.stringify(body),
         });
 
         if (!res.ok) {
-            const errorText = await res.text();
-            return Response.json({ error: "Backend error", detail: errorText }, { status: res.status });
+            return backendError(res, "Unable to retrieve an answer.");
         }
 
         // Return the raw body stream from FastAPI to the browser

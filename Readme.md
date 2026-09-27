@@ -211,3 +211,80 @@ For production deployment, set the frontend environment variable to your deploye
 ```env
 NEXT_PUBLIC_API_URL=https://your-backend-url.com
 ```
+
+## Document lifecycle and retrieval
+
+Uploads accept PDF and DOCX files only. The API sanitizes the display filename,
+stores the file under a generated `document_id`, records a SHA-256 hash to make
+retries idempotent, and attaches `document_id`, `filename`, `chunk_id`, source,
+and page or location metadata to every indexed chunk.
+
+The document library reports `pending`, `processing`, `completed`, `failed`, or
+`duplicate`. Only completed documents can be selected for questions. The
+selected document IDs are validated against the registry and are applied to
+vector retrieval, citations, and follow-up queries.
+
+Answers are delivered as server-sent events. The event payload includes an
+explicit `event` field (`answer_delta`, `sources`, `suggestions`, `error`, or
+`done`); the frontend also handles the earlier compatible fields during rollout.
+Suggested questions are delivered separately from answer content.
+
+## API behavior
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /upload` | Validate, store, index, and register a PDF or DOCX upload. |
+| `GET /files` | List documents visible to the current workspace. |
+| `GET /documents/{document_id}/status` | Return a document processing status. |
+| `POST /ask` | Stream a grounded answer for the selected document scope. |
+| `POST /delete_file` | Delete one registered document and its vectors. |
+| `POST /clear` | Clear the current workspace document set. |
+| `GET /health` | Confirm that the application process is running. |
+| `GET /ready` | Report vector-store readiness. |
+
+Errors retain a `detail` field for compatibility and also provide a structured
+`error` object with a code, safe message, and request ID. Frontend proxy routes
+forward authorization, workspace, and request-tracing headers to the backend.
+
+## Security and configuration
+
+Set production configuration through environment variables rather than source
+edits. At minimum, configure `ALLOWED_ORIGINS`; enable `AUTH_REQUIRED` and set
+`API_TOKEN` for protected deployments. `RATE_LIMIT_PER_MINUTE` limits expensive
+requests by client, user, workspace, and route.
+
+```env
+ALLOWED_ORIGINS=https://your-frontend.example
+AUTH_REQUIRED=true
+API_TOKEN=replace-with-a-secret
+RATE_LIMIT_PER_MINUTE=60
+```
+
+The local metadata registry is JSON and the local vector implementation is
+Chroma. They are suitable for local development; a production deployment should
+place persistent storage behind the documented storage and vector abstractions
+before relying on multi-instance scaling.
+
+## Testing and verification
+
+Backend tests cover upload validation, HTTP statuses, duplicate handling,
+document IDs, chunk metadata, scope isolation, prompt-injection boundaries,
+authentication, and rate limiting. From an environment with the backend
+dependencies installed, run:
+
+```bash
+python -m pytest -q
+```
+
+For the frontend:
+
+```bash
+cd research-frontend
+npm run lint
+npm run build
+```
+
+The browser persists conversation history locally. To demonstrate the full
+workflow: upload two distinct documents, select one, ask a known question,
+inspect its citations, refresh to confirm history persists, then delete it and
+verify the other document remains available.

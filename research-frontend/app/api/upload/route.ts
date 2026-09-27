@@ -1,3 +1,5 @@
+import { backendHeaders } from "../../lib/backend";
+
 export async function POST(req: Request) {
     try {
         const formData = await req.formData();
@@ -6,28 +8,25 @@ export async function POST(req: Request) {
         const res = await fetch(`${BACKEND_URL}/upload`, {
             method: "POST",
             body: formData,
+            headers: backendHeaders(req),
         });
 
-        // 🔥 ALWAYS read as text first
         const text = await res.text();
-
-        console.log("Backend response:", text);
 
         // 🔥 Try parse JSON safely
         try {
             const data = JSON.parse(text);
+            if (!res.ok) return Response.json(data, { status: res.status });
             return Response.json(data, { status: res.status });
         } catch {
-            console.error("❌ Not JSON:", text);
-
             return Response.json(
-                { error: "Invalid backend response", raw: text },
-                { status: 500 }
+                { error: { code: "INVALID_BACKEND_RESPONSE", message: "Upload service returned an invalid response." } },
+                { status: res.ok ? 502 : res.status }
             );
         }
 
     } catch (error) {
-        console.error("❌ Proxy crash:", error);
+        console.error("Upload proxy failed", error);
 
         return Response.json(
             { error: "Upload proxy failed" },

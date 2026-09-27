@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import shutil
 import time
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 
 from config import settings
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_community.vectorstores import Chroma
@@ -28,10 +30,61 @@ from ingest import (
 
 load_dotenv()
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("smart_research_agent")
+
 MAX_UPLOAD_BYTES = settings.max_upload_size
 ALLOWED_ORIGINS = list(settings.cors_origins)
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Unhandled request error request_id=%s path=%s", request_id, request.url.path)
+        raise
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        (time.perf_counter() - started_at) * 1000,
+    )
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    message = str(exc.detail)
+    code = "REQUEST_ERROR" if exc.status_code < 500 else "INTERNAL_ERROR"
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": message,
+            "error": {"code": code, "message": message, "request_id": request_id},
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": "Invalid request.",
+            "error": {"code": "VALIDATION_ERROR", "message": "Invalid request.", "request_id": request_id},
+        },
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -356,6 +409,33 @@ class QueryRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     filename: str
+
+
+class CitationResponse(BaseModel):
+    page: int | str
+    content: str
+    document_id: str | None = None
+    filename: str | None = None
+    chunk_id: str | None = None
+    score: float | None = None
+
+
+class UploadResponse(BaseModel):
+    message: str
+    status: str
+    document_id: str
+    duplicate_of: str | None = None
+
+
+class DocumentStatusResponse(BaseModel):
+    document_id: str
+    status: str
+    filename: str | None = None
+
+
+def stream_event(event: str, **payload):
+    """Return a backward-compatible SSE payload with an explicit event type."""
+    return f"data: {json.dumps({'event': event, **payload})}\n\n"
 
 
 DOCUMENT_REGISTRY_PATH = os.path.join("data", "documents.json")
@@ -710,7 +790,7 @@ def readiness_check():
     return {"status": "ready", "database": db_state}
 
 
-@app.post("/upload")
+@app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(request: Request, file: UploadFile = File(None)):
     if file is None or file.filename is None or not file.filename.strip():
         raise HTTPException(
@@ -893,11 +973,18 @@ def list_files(request: Request):
         ) from exc
 
 
-@app.get("/documents/{document_id}/status")
-def get_document_status(document_id: str):
+@app.get("/documents/{document_id}/status", response_model=DocumentStatusResponse)
+def get_document_status(document_id: str, request: Request):
     registry = _load_document_registry()
     record = registry.get(document_id)
     if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    user_id, workspace_id = _get_user_workspace_context(request)
+    if record.get("user_id") not in {None, user_id} or record.get("workspace_id") not in {None, workspace_id}:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
@@ -911,27 +998,31 @@ def get_document_status(document_id: str):
 
 
 @app.post("/delete_file")
-def delete_file(request: DeleteRequest, user_id: str | None = None, workspace_id: str | None = None):
+def delete_file(payload: DeleteRequest, http_request: Request):
     global db
 
-    if not request.filename:
+    if not payload.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing filename.",
         )
 
-    user_id, workspace_id = _get_user_workspace_context(user_id=user_id, workspace_id=workspace_id)
-    record = _find_document_record_by_filename(request.filename, user_id=user_id, workspace_id=workspace_id)
+    user_id, workspace_id = _get_user_workspace_context(http_request)
+    record = _find_document_record_by_filename(payload.filename, user_id=user_id, workspace_id=workspace_id)
     file_path = None
     if record is not None:
         file_path = record.get("path")
-    else:
-        file_path = os.path.join("data", request.filename)
+    elif not _load_document_registry():
+        # Pre-registry installs stored files under their display names. Keep this
+        # migration path tightly constrained to a sanitized, supported filename.
+        safe_filename = sanitize_filename(payload.filename)
+        if safe_filename == payload.filename and safe_filename.lower().endswith((".pdf", ".docx")):
+            file_path = os.path.join("data", safe_filename)
 
     if file_path is None or not os.path.exists(file_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document '{request.filename}' not found.",
+            detail=f"Document '{payload.filename}' not found.",
         )
 
     try:
@@ -948,11 +1039,17 @@ def delete_file(request: DeleteRequest, user_id: str | None = None, workspace_id
             _remove_document_registry_entry(record["document_id"])
 
         os.remove(file_path)
-        return {"message": f"Successfully deleted {request.filename}"}
+        logger.info(
+            "document_deleted document_id=%s user_id=%s workspace_id=%s",
+            record.get("document_id") if record else None,
+            user_id,
+            workspace_id,
+        )
+        return {"message": f"Successfully deleted {payload.filename}"}
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unable to delete '{request.filename}'.",
+            detail=f"Unable to delete '{payload.filename}'.",
         ) from exc
     except Exception as exc:
         raise HTTPException(
@@ -976,21 +1073,30 @@ def clear_db(request: Request):
             retriever = None
 
         registry = _load_document_registry()
+        records_to_remove = []
         if user_id is None and workspace_id is None:
+            records_to_remove = list(registry.values())
             registry.clear()
         else:
             for document_id, record in list(registry.items()):
                 if record.get("user_id") == user_id and record.get("workspace_id") == workspace_id:
+                    records_to_remove.append(record)
                     registry.pop(document_id, None)
         _save_document_registry(registry)
 
         if os.path.exists("data"):
-            for filename in os.listdir("data"):
-                if filename == "documents.json":
-                    continue
-                file_path = os.path.join("data", filename)
-                if os.path.isfile(file_path):
+            for record in records_to_remove:
+                file_path = record.get("path")
+                if file_path and os.path.isfile(file_path):
                     os.remove(file_path)
+            # Preserve legacy behaviour only for the unscoped maintenance route.
+            if user_id is None and workspace_id is None:
+                for filename in os.listdir("data"):
+                    if filename == "documents.json":
+                        continue
+                    file_path = os.path.join("data", filename)
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
 
         return {"message": "Database and files cleared successfully"}
     except OSError as exc:
@@ -1137,11 +1243,15 @@ async def ask_question(http_request: Request, payload: QueryRequest):
             "content": doc.page_content[:200],
             "document_id": metadata.get("document_id"),
             "filename": metadata.get("filename"),
+            "chunk_id": metadata.get("chunk_id"),
+            "score": metadata.get("score"),
         })
 
     if not docs:
         async def empty_gen():
-            yield f"data: {json.dumps({'answer': 'No relevant information found.', 'sources': []})}\n\n"
+            yield stream_event("sources", sources=[])
+            yield stream_event("answer_delta", content="Not enough information in the selected document.")
+            yield stream_event("done")
         return StreamingResponse(empty_gen(), media_type="text/event-stream")
 
     if is_summary_question(query):
@@ -1153,7 +1263,7 @@ async def ask_question(http_request: Request, payload: QueryRequest):
         )
 
         async def summary_generator():
-            yield f"data: {json.dumps({'sources': sources})}\n\n"
+            yield stream_event("sources", sources=sources)
             try:
                 if hasattr(llm, "invoke"):
                     response = llm.invoke(summary_prompt)
@@ -1164,11 +1274,12 @@ async def ask_question(http_request: Request, payload: QueryRequest):
                         if getattr(chunk, "content", None):
                             content += chunk.content
             except Exception as exc:
-                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                logger.exception("summary_generation_failed")
+                yield stream_event("error", error="Unable to generate a document summary.")
                 return
 
-            yield f"data: {json.dumps({'content': content})}\n\n"
-            yield "data: [DONE]\n\n"
+            yield stream_event("answer_delta", content=content)
+            yield stream_event("done")
 
         return StreamingResponse(summary_generator(), media_type="text/event-stream")
 
@@ -1177,27 +1288,49 @@ async def ask_question(http_request: Request, payload: QueryRequest):
     prompt = build_answer_prompt(query, context, history)
 
     async def event_generator():
-        yield f"data: {json.dumps({'sources': sources})}\n\n"
-        full_response = ""
+        yield stream_event("sources", sources=sources)
+        pending = ""
+        suggestions_payload = ""
+        marker = "SUGGESTIONS:"
 
         try:
             async for chunk in llm.astream(prompt):
                 if chunk.content:
-                    full_response += chunk.content
-                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+                    if suggestions_payload:
+                        suggestions_payload += chunk.content
+                        continue
+
+                    pending += chunk.content
+                    marker_index = pending.find(marker)
+                    if marker_index >= 0:
+                        answer_text = pending[:marker_index]
+                        if answer_text:
+                            yield stream_event("answer_delta", content=answer_text)
+                        suggestions_payload = pending[marker_index + len(marker):]
+                        pending = ""
+                        continue
+
+                    # Hold a short suffix so a marker split across two chunks is not rendered.
+                    emit_length = max(0, len(pending) - len(marker) + 1)
+                    if emit_length:
+                        yield stream_event("answer_delta", content=pending[:emit_length])
+                        pending = pending[emit_length:]
         except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            logger.exception("answer_generation_failed")
+            yield stream_event("error", error="Answer generation failed. Please try again.")
             return
 
-        if "SUGGESTIONS:" in full_response:
-            try:
-                suggestions_str = full_response.split("SUGGESTIONS:", 1)[1].strip()
-                suggestions = json.loads(suggestions_str)
-                yield f"data: {json.dumps({'suggestions': suggestions})}\n\n"
-            except Exception:
-                pass
+        if pending:
+            yield stream_event("answer_delta", content=pending)
 
-        yield "data: [DONE]\n\n"
+        if suggestions_payload:
+            try:
+                suggestions = json.loads(suggestions_payload.strip())
+                if isinstance(suggestions, list):
+                    yield stream_event("suggestions", suggestions=suggestions[:3])
+            except Exception:
+                logger.warning("suggestions_parse_failed")
+
+        yield stream_event("done")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
- 
