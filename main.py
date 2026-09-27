@@ -9,7 +9,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from config import settings
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_community.vectorstores import Chroma
@@ -252,9 +252,76 @@ db = None
 retriever = None
 embeddings = None
 llm = None
+RATE_LIMIT_BUCKETS = {}
 
 os.makedirs("data", exist_ok=True)
 os.makedirs("db", exist_ok=True)
+
+
+def get_expected_api_token() -> str:
+    return os.getenv("API_TOKEN") or os.getenv("AUTH_TOKEN") or settings.api_token or "dev-token"
+
+
+def get_request_identity(request: Request):
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        ip_address = forwarded_for.split(",", 1)[0].strip()
+    else:
+        ip_address = request.client.host if request.client else "unknown"
+
+    user_id = request.headers.get("x-user-id") or request.headers.get("X-User-ID")
+    workspace_id = request.headers.get("x-workspace-id") or request.headers.get("X-Workspace-ID")
+    return ip_address, user_id or settings.default_user_id, workspace_id or settings.default_workspace_id
+
+
+def clear_rate_limit_state():
+    RATE_LIMIT_BUCKETS.clear()
+
+
+def _check_rate_limit(request: Request) -> bool:
+    if settings.rate_limit_per_minute <= 0:
+        return False
+
+    client_ip, user_id, workspace_id = get_request_identity(request)
+    bucket_key = f"{client_ip}:{user_id}:{workspace_id}:{request.url.path}"
+    now = time.time()
+    timestamps = RATE_LIMIT_BUCKETS.setdefault(bucket_key, [])
+    minute_window = 60
+    timestamps[:] = [ts for ts in timestamps if now - ts < minute_window]
+    if len(timestamps) >= settings.rate_limit_per_minute:
+        return True
+    timestamps.append(now)
+    return False
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if settings.auth_required:
+        auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+        api_key_header = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+        token_value = None
+
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token_value = auth_header.split(" ", 1)[1].strip()
+        elif api_key_header:
+            token_value = api_key_header.strip()
+
+        if token_value != get_expected_api_token():
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Authentication required."},
+            )
+
+    if _check_rate_limit(request):
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Rate limit exceeded. Please try again later."},
+        )
+
+    return await call_next(request)
 
 
 def get_llm():

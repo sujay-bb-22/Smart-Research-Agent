@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class AppConfig:
     environment: str = os.getenv("APP_ENV", "development")
     model: str = os.getenv("MODEL", "openai/gpt-oss-20b")
@@ -24,6 +24,9 @@ class AppConfig:
     database_path: str = os.getenv("DATABASE_PATH", os.path.join("data", "documents.json"))
     auth_required: bool = os.getenv("AUTH_REQUIRED", "false").lower() == "true"
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+    api_token: str = os.getenv("API_TOKEN") or os.getenv("AUTH_TOKEN") or "dev-token"
+    default_user_id: str = os.getenv("DEFAULT_USER_ID", "default-user")
+    default_workspace_id: str = os.getenv("DEFAULT_WORKSPACE_ID", "default-workspace")
 
 
 settings = AppConfig()
