@@ -748,6 +748,21 @@ def _remove_document_registry_entry(document_id: str):
     _save_document_registry(registry)
 
 
+def _reset_persisted_vector_store(path: str):
+    if not os.path.isdir(path):
+        return
+
+    for child in os.listdir(path):
+        child_path = os.path.join(path, child)
+        if os.path.isdir(child_path):
+            shutil.rmtree(child_path, ignore_errors=True)
+        else:
+            try:
+                os.remove(child_path)
+            except OSError:
+                pass
+
+
 def load_db():
     global db, retriever, embeddings
 
@@ -757,9 +772,19 @@ def load_db():
             if google_api_key:
                 embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
             else:
-                embeddings = FakeEmbeddings(size=3)
+                embeddings = FakeEmbeddings(size=384)
 
-        db = Chroma(persist_directory="db", embedding_function=embeddings)
+        db_path = settings.vector_store_path
+        os.makedirs(db_path, exist_ok=True)
+
+        try:
+            db = Chroma(persist_directory=db_path, embedding_function=embeddings)
+            db.get(include=["ids"], limit=1)
+        except Exception:
+            logger.warning("Persisted vector store at %s is stale or unreadable; recreating it.", db_path)
+            _reset_persisted_vector_store(db_path)
+            db = Chroma(persist_directory=db_path, embedding_function=embeddings)
+
         if isinstance(db, Chroma):
             db.documents = []
         retriever = db.as_retriever(search_kwargs={"k": 3})
@@ -899,16 +924,38 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
         normalized_docs = _normalize_documents_for_chroma(docs)
 
         if db is not None:
-            db.add_documents(normalized_docs)
+            try:
+                db.add_documents(normalized_docs)
+            except Exception as exc:
+                message = str(exc).lower()
+                if "dimension" in message and "embedding" in message:
+                    logger.warning(
+                        "Vector store dimension mismatch detected for document_id=%s; resetting persisted collection.",
+                        document_id,
+                    )
+                    _reset_persisted_vector_store(settings.vector_store_path)
+                    db = None
+                    retriever = None
+                    load_db()
+                    db.add_documents(normalized_docs)
+                else:
+                    raise
             if isinstance(db, Chroma):
                 prior_documents = list(getattr(db, "documents", []))
                 db.documents = prior_documents + list(normalized_docs)
         else:
-            db = Chroma.from_documents(normalized_docs, embeddings, persist_directory="db")
+            db = Chroma.from_documents(normalized_docs, embeddings, persist_directory=settings.vector_store_path)
             if isinstance(db, Chroma):
                 db.documents = list(normalized_docs)
             retriever = db.as_retriever(search_kwargs={"k": 3})
     except Exception as exc:
+        logger.exception(
+            "document_indexing_failed document_id=%s filename=%s user_id=%s workspace_id=%s",
+            document_id,
+            file.filename,
+            user_id,
+            workspace_id,
+        )
         _update_document_registry_entry(document_id, status="failed", error="Document indexing failed.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
