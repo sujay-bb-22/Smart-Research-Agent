@@ -148,8 +148,10 @@ def get_pdf_chunks(pdf_path, document_id=None, filename=None):
         if file_type == "pdf":
             loader = PyMuPDFLoader(pdf_path)
             documents = loader.load()
+            page_count = len(documents)
         elif file_type == "docx":
             documents = load_docx_documents(pdf_path)
+            page_count = None
         else:
             raise UnsupportedDocumentError("Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE)
     except IngestionError:
@@ -174,6 +176,19 @@ def get_pdf_chunks(pdf_path, document_id=None, filename=None):
         metadata["filename"] = file_name
         metadata["source"] = metadata.get("source") or pdf_path
         metadata["chunk_id"] = f"{document_id}-chunk-{index:03d}"
+
+        if file_type == "pdf":
+            if "page" in metadata:
+                try:
+                    page_number = int(metadata["page"])
+                    metadata["page"] = page_number + 1 if page_number == 0 else page_number
+                except (TypeError, ValueError):
+                    metadata.pop("page", None)
+            if "page" not in metadata:
+                metadata["page"] = 1
+            metadata["page_count"] = page_count
+        elif "page" in metadata:
+            metadata.pop("page", None)
 
         if "page" not in metadata and "location" not in metadata:
             metadata["location"] = "document-body"
