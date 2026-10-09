@@ -247,9 +247,12 @@ def normalize_semantic_distance(distance, metric: str | None = None) -> float:
     if distance is None:
         return 0.0
     try:
-        value = max(float(distance), 0.0)
+        value = float(distance)
     except (TypeError, ValueError):
         return 0.0
+
+    if 0.0 <= value <= 1.0:
+        return max(0.0, min(1.0, value))
 
     metric_name = (metric or "l2").lower()
     if metric_name == "cosine":
@@ -1357,6 +1360,7 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             chunk_count=len(normalized_docs),
             completed_at=time.time(),
         )
+        return
     except (UnsupportedDocumentError, DocumentParsingError, ValueError) as exc:
         logger.exception(
             "document_processing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
@@ -1367,6 +1371,7 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             workspace_id,
         )
         _update_document_registry_entry(document_id, status="failed", error=str(exc), failed_at=time.time())
+        raise
     except Exception as exc:
         logger.exception(
             "document_indexing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
@@ -1377,10 +1382,11 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             workspace_id,
         )
         _update_document_registry_entry(document_id, status="failed", error="Document indexing failed.", failed_at=time.time())
+        raise RuntimeError("Document indexing failed.") from exc
 
 
-@app.post("/upload", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_pdf(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(None)):
+@app.post("/upload", response_model=UploadResponse, status_code=status.HTTP_200_OK)
+async def upload_pdf(request: Request, file: UploadFile = File(None)):
     if file is None or file.filename is None or not file.filename.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1456,18 +1462,24 @@ async def upload_pdf(request: Request, background_tasks: BackgroundTasks, file: 
         ) from exc
 
     _update_document_registry_entry(document_id, status="processing", error=None)
-    background_tasks.add_task(
-        _process_document_upload,
-        document_id,
-        file_path,
-        file.filename,
-        user_id,
-        workspace_id,
-        getattr(request.state, "request_id", None),
-    )
+    try:
+        _process_document_upload(
+            document_id,
+            file_path,
+            file.filename,
+            user_id,
+            workspace_id,
+            getattr(request.state, "request_id", None),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc) or "Document indexing failed.",
+        ) from exc
+
     return {
-        "message": "Document accepted for processing",
-        "status": "processing",
+        "message": "Document uploaded and indexed successfully",
+        "status": "completed",
         "document_id": document_id,
         "filename": file.filename,
     }

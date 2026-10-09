@@ -6,7 +6,14 @@ client = TestClient(main.app)
 
 
 def test_upload_records_user_and_workspace(monkeypatch):
+    class FakeDB:
+        def add_documents(self, documents):
+            self.documents = documents
+
     monkeypatch.setattr(main.settings, "auth_required", False)
+    monkeypatch.setattr(main, "load_db", lambda: None)
+    monkeypatch.setattr(main, "db", FakeDB())
+    monkeypatch.setattr(main, "retriever", object())
     monkeypatch.setattr(
         main,
         "_call_ingestion_with_metadata",
