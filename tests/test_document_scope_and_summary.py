@@ -57,7 +57,7 @@ def test_ask_question_filters_retrieval_to_selected_documents(monkeypatch):
     async def fake_stream(prompt):
         yield type("Chunk", (), {"content": "Only A is relevant."})()
 
-    monkeypatch.setattr(main, "get_llm", lambda: type("L", (), {"astream": fake_stream})())
+    monkeypatch.setattr(main, "llm", type("L", (), {"astream": fake_stream})())
 
     response = client.post(
         "/ask",
@@ -69,4 +69,20 @@ def test_ask_question_filters_retrieval_to_selected_documents(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert fake_db.calls[0]["filter"] == {"document_id": {"$in": ["doc-a"]}}
+    scope_filter = fake_db.calls[0]["filter"]
+    assert main._metadata_matches_filter(
+        {
+            "document_id": "doc-a",
+            "user_id": main.settings.default_user_id,
+            "workspace_id": main.settings.default_workspace_id,
+        },
+        scope_filter,
+    )
+    assert not main._metadata_matches_filter(
+        {
+            "document_id": "doc-b",
+            "user_id": main.settings.default_user_id,
+            "workspace_id": main.settings.default_workspace_id,
+        },
+        scope_filter,
+    )

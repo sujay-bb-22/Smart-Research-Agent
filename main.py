@@ -973,6 +973,8 @@ def _find_duplicate_document(file_hash: str | None, user_id: str | None = None, 
     registry = _load_document_registry()
     for record in registry.values():
         if record.get("sha256") == file_hash:
+            if record.get("deleted") or _normalize_document_status(record.get("status")) == "failed":
+                continue
             if user_id is not None and record.get("user_id") not in {None, user_id}:
                 continue
             if workspace_id is not None and record.get("workspace_id") not in {None, workspace_id}:
@@ -1138,7 +1140,7 @@ def _vector_config_mismatch(expected: dict, stored: dict | None, sqlite_dimensio
     return None
 
 
-def ensure_vector_store_compatible(path: str, expected_config: dict, allow_reset: bool = True):
+def ensure_vector_store_compatible(path: str, expected_config: dict, allow_reset: bool = False):
     os.makedirs(path, exist_ok=True)
     stored_config = _read_vector_config(path)
     sqlite_dimension = _sqlite_collection_dimension(path, expected_config.get("collection", DEFAULT_CHROMA_COLLECTION))
@@ -1198,7 +1200,7 @@ def load_db():
             db_path = settings.vector_store_path
             os.makedirs(db_path, exist_ok=True)
             expected_config = _active_embedding_config(embeddings)
-            ensure_vector_store_compatible(db_path, expected_config, allow_reset=True)
+            ensure_vector_store_compatible(db_path, expected_config, allow_reset=False)
 
             try:
                 db = Chroma(persist_directory=db_path, embedding_function=embeddings)
@@ -1286,7 +1288,7 @@ def index_document_chunks(normalized_docs, document_id: str, request_id: str | N
             load_db()
 
         expected_config = _active_embedding_config(embeddings)
-        ensure_vector_store_compatible(settings.vector_store_path, expected_config, allow_reset=True)
+        ensure_vector_store_compatible(settings.vector_store_path, expected_config, allow_reset=False)
 
         if db is None:
             db = Chroma.from_documents(
@@ -1409,7 +1411,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
         )
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"Uploaded file exceeds the maximum size of {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
         )
 
@@ -1494,7 +1496,9 @@ def list_files(request: Request):
         registry = _load_document_registry()
 
         if user_id is None and workspace_id is None:
-            if os.path.exists("data"):
+            if registry:
+                user_id, workspace_id = _get_user_workspace_context(request)
+            elif os.path.exists("data"):
                 for filename in sorted(os.listdir("data")):
                     lowered = filename.lower()
                     if lowered.endswith((".pdf", ".docx")):
@@ -1506,7 +1510,9 @@ def list_files(request: Request):
                             "uploaded_at": os.path.getmtime(file_path),
                             "status": "completed",
                         })
-            return {"files": files}
+                return {"files": files}
+            else:
+                return {"files": files}
 
         if registry:
             for record in registry.values():
@@ -1627,7 +1633,7 @@ def clear_db(request: Request):
     global db, retriever
 
     try:
-        user_id, workspace_id = _get_user_workspace_context(request, default_if_missing=False)
+        user_id, workspace_id = _get_user_workspace_context(request)
         if db is not None:
             if user_id is None and workspace_id is None:
                 db.delete_collection()
@@ -1830,7 +1836,7 @@ def summarize_document_chunks(question: str, documents, history=None):
 async def ask_question(http_request: Request, payload: QueryRequest):
     global retriever
 
-    user_id, workspace_id = _get_user_workspace_context(http_request, default_if_missing=False)
+    user_id, workspace_id = _get_user_workspace_context(http_request)
     query = (payload.question or "").strip()
     if not query:
         raise HTTPException(

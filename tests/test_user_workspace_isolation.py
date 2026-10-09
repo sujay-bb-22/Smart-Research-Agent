@@ -33,6 +33,78 @@ def test_upload_records_user_and_workspace(monkeypatch):
     assert record["workspace_id"] == "workspace-1"
 
 
+def test_upload_library_and_chat_share_default_document_scope(monkeypatch, tmp_path):
+    class FakeDB:
+        def __init__(self):
+            self.documents = []
+
+        def add_documents(self, documents):
+            self.documents.extend(documents)
+
+    class FakeLLM:
+        async def astream(self, prompt):
+            yield type("Chunk", (), {"content": "Alpha is the indexed finding."})()
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(main.settings, "auth_required", False)
+    monkeypatch.setattr(main.settings, "vector_store_path", str(tmp_path / "db"))
+    monkeypatch.setattr(main, "load_db", lambda: None)
+    monkeypatch.setattr(main, "db", fake_db)
+    monkeypatch.setattr(main, "retriever", object())
+    monkeypatch.setattr(main, "embeddings", object())
+    monkeypatch.setattr(main, "llm", FakeLLM())
+    monkeypatch.setattr(main, "lexical_index", main.LexicalIndex())
+    monkeypatch.setattr(
+        main,
+        "get_pdf_chunks",
+        lambda path, document_id=None, filename=None: [
+            main.Document(
+                page_content="Alpha is the indexed finding.",
+                metadata={"source": path, "page": 1, "document_id": document_id, "filename": filename},
+            )
+        ],
+    )
+
+    upload = client.post(
+        "/upload",
+        files={"file": ("alpha.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF", "application/pdf")},
+    )
+
+    assert upload.status_code == 200, upload.text
+    document_id = upload.json()["document_id"]
+    assert upload.json()["status"] == "completed"
+
+    library = client.get("/files")
+    assert library.status_code == 200
+    assert any(item["document_id"] == document_id for item in library.json()["files"])
+
+    retrieved_scopes = []
+    document = main.Document(
+        page_content="Alpha is the indexed finding.",
+        metadata={
+            "document_id": document_id,
+            "filename": "alpha.pdf",
+            "page": 1,
+            "user_id": main.settings.default_user_id,
+            "workspace_id": main.settings.default_workspace_id,
+        },
+    )
+
+    def retrieve(query, db_handle, top_k, scope_filter):
+        retrieved_scopes.append(scope_filter)
+        return [document], {id(document): 0.9}
+
+    monkeypatch.setattr(main, "build_hybrid_candidate_documents", retrieve)
+    answer = client.post(
+        "/ask",
+        json={"question": "What is the finding?", "selected_document_ids": [document_id], "history": []},
+    )
+
+    assert answer.status_code == 200, answer.text
+    assert "Alpha is the indexed finding." in answer.text
+    assert main._metadata_matches_filter(document.metadata, retrieved_scopes[0])
+
+
 def test_validate_selected_document_ids_enforces_user_and_workspace_scope():
     registry = {
         "doc-a": {"document_id": "doc-a", "status": "completed", "user_id": "user-1", "workspace_id": "workspace-1"},

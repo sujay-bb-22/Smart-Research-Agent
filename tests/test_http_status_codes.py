@@ -166,7 +166,7 @@ def test_clear_success_returns_200():
 
 def test_clear_failure_returns_500(monkeypatch):
     main.db = FakeDB()
-    monkeypatch.setattr(main.db, "delete_collection", lambda: (_ for _ in ()).throw(RuntimeError("db failure")))
+    monkeypatch.setattr(main.db, "delete", lambda where=None: (_ for _ in ()).throw(RuntimeError("db failure")))
 
     response = client.post("/clear")
 

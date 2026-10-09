@@ -129,12 +129,12 @@ export default function Home() {
   const hasHydratedConversation = useRef(false);
 
   // 🔹 Fetch files
-  const fetchFiles = async () => {
+  const fetchFiles = async (): Promise<DocumentEntry[] | null> => {
     try {
       const res = await fetch("/api/files");
       if (!res.ok) {
         console.error("Fetch files failed:", res.status);
-        return;
+        return null;
       }
 
       const data = await res.json();
@@ -152,8 +152,10 @@ export default function Home() {
         }
         return currentDocumentIds;
       });
+      return fileList;
     } catch (err) {
       console.error("Fetch files error:", err);
+      return null;
     }
   };
 
@@ -372,14 +374,25 @@ export default function Home() {
         data = null;
       }
 
-      const successMessage = typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message?: unknown }).message ?? "")
+      const uploadResult = typeof data === "object" && data !== null
+        ? data as { status?: unknown; document_id?: unknown }
+        : null;
+      const documentId = typeof uploadResult?.document_id === "string"
+        ? uploadResult.document_id.trim()
         : "";
+      const isCompleted = uploadResult?.status === "completed" || uploadResult?.status === "duplicate";
 
-      if (res.ok && successMessage === "Document uploaded and processed successfully") {
-        setUploadStatus("✅ Uploaded successfully!");
+      if (res.ok && isCompleted && documentId) {
         setFile(null);
-        await fetchFiles();
+        const refreshedFiles = await fetchFiles();
+        if (!refreshedFiles?.some((entry) => entry.document_id === documentId)) {
+          setUploadStatus("❌ Upload completed, but the document did not appear in the library. Refresh and try again.");
+          return;
+        }
+        setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
+        setUploadStatus(uploadResult.status === "duplicate"
+          ? "✅ This document is already in your library."
+          : "✅ Document uploaded and indexed successfully.");
         return;
       }
 

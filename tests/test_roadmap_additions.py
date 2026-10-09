@@ -37,6 +37,19 @@ def test_duplicate_content_returns_duplicate_response(monkeypatch):
     assert calls == []
 
 
+def test_failed_document_does_not_block_retry_with_same_content(monkeypatch):
+    failed_record = {
+        "document_id": "doc-failed",
+        "filename": "sample.pdf",
+        "path": "data/doc-failed.pdf",
+        "sha256": "same-hash",
+        "status": "failed",
+    }
+    monkeypatch.setattr(main, "_load_document_registry", lambda: {"doc-failed": failed_record})
+
+    assert main._find_duplicate_document("same-hash") is None
+
+
 def test_query_rewriting_keeps_scope():
     history = [{"role": "user", "content": "What is the main conclusion?"}]
     rewritten = main.rewrite_follow_up_question("Why is that important?", history)

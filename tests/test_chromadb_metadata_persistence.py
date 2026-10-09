@@ -1,6 +1,7 @@
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import FakeEmbeddings
+import pytest
 
 
 def test_chromadb_keeps_document_metadata_after_insert_and_retrieval(tmp_path):
@@ -50,3 +51,26 @@ def test_chromadb_keeps_document_metadata_after_insert_and_retrieval(tmp_path):
     assert stored["metadatas"]
     assert any(item.get("document_id") == "doc-123" for item in stored["metadatas"])
     assert all("chunk_id" in item for item in stored["metadatas"])
+
+
+def test_vector_config_mismatch_fails_without_deleting_existing_data(tmp_path):
+    vector_path = tmp_path / "chromadb"
+    vector_path.mkdir()
+    marker = vector_path / "existing-data.marker"
+    marker.write_text("preserve", encoding="utf-8")
+    main_config = {
+        "provider": "fake",
+        "model": "FakeEmbeddings",
+        "dimension": 3,
+        "collection": "langchain",
+        "distance_metric": "l2",
+    }
+    expected_config = {**main_config, "dimension": 4}
+    from main import _write_vector_config, ensure_vector_store_compatible
+
+    _write_vector_config(str(vector_path), main_config)
+
+    with pytest.raises(RuntimeError, match="Vector store is incompatible"):
+        ensure_vector_store_compatible(str(vector_path), expected_config)
+
+    assert marker.read_text(encoding="utf-8") == "preserve"
