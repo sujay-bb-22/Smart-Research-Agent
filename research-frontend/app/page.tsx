@@ -1,0 +1,660 @@
+"use client";
+
+import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  Trash2,
+  Download,
+  Copy,
+  Plus,
+  Library,
+  Database,
+  Cpu,
+  MessageSquare,
+  ChevronRight,
+} from "lucide-react";
+import { clearConversation, loadConversation, saveConversation } from "./lib/conversation";
+import { readSseStream, type StreamEvent } from "./lib/sse";
+import { SourceCitations, type Citation } from "./components/SourceCitations";
+
+type Source = {
+  page: number | string;
+  content: string;
+} & Omit<Citation, "page" | "content">;
+
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+  sources?: Source[];
+  suggestions?: string[];
+  error?: string;
+};
+
+type DocumentEntry = {
+  document_id?: string;
+  name: string;
+  size: number;
+  uploaded_at: number;
+  status?: "pending" | "processing" | "completed" | "failed" | "duplicate";
+};
+
+const isDocumentEntry = (value: unknown): value is DocumentEntry => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.name === "string" &&
+    typeof record.size === "number" &&
+    typeof record.uploaded_at === "number" &&
+    (record.document_id === undefined || typeof record.document_id === "string")
+  );
+};
+
+const normalizeFileList = (value: unknown): DocumentEntry[] => {
+  if (Array.isArray(value)) {
+    return value.filter(isDocumentEntry);
+  }
+
+  if (value && typeof value === "object") {
+    const candidate = value as { files?: unknown };
+    if (Array.isArray(candidate.files)) {
+      return candidate.files.filter(isDocumentEntry);
+    }
+  }
+
+  return [];
+};
+
+const SUPPORTED_FORMAT_MESSAGE = "Supported formats: PDF, DOCX.";
+
+const getErrorMessage = (payload: unknown, fallback: string) => {
+  if (!payload || typeof payload !== "object") return fallback;
+
+  const data = payload as Record<string, unknown>;
+  if (typeof data.detail === "string" && data.detail.trim()) return data.detail.trim();
+  if (typeof data.error === "string" && data.error.trim()) return data.error.trim();
+  if (data.error && typeof data.error === "object") {
+    const error = data.error as Record<string, unknown>;
+    if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+  }
+  if (typeof data.message === "string" && data.message.trim()) return data.message.trim();
+
+  return fallback;
+};
+
+const validateSelectedFile = (selectedFile: File | null) => {
+  if (!selectedFile) {
+    return { valid: false, message: "No file selected. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  const fileName = selectedFile.name.toLowerCase();
+  const isPdf = fileName.endsWith(".pdf");
+  const isDocx = fileName.endsWith(".docx");
+
+  if (!isPdf && !isDocx) {
+    return { valid: false, message: "Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  const mimeType = selectedFile.type.toLowerCase();
+  const validMimeTypes = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-office",
+    "application/octet-stream",
+    "application/zip",
+  ];
+
+  if (mimeType && !validMimeTypes.includes(mimeType)) {
+    return { valid: false, message: "Unsupported file type. " + SUPPORTED_FORMAT_MESSAGE };
+  }
+
+  return { valid: true, message: "" };
+};
+
+export default function Home() {
+  const [question, setQuestion] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [clearing, setClearing] = useState(false);
+  const [files, setFiles] = useState<DocumentEntry[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const hasHydratedConversation = useRef(false);
+
+  // 🔹 Fetch files
+  const fetchFiles = async (): Promise<DocumentEntry[] | null> => {
+    try {
+      const res = await fetch("/api/files");
+      if (!res.ok) {
+        console.error("Fetch files failed:", res.status);
+        return null;
+      }
+
+      const data = await res.json();
+      const fileList: DocumentEntry[] = normalizeFileList(data);
+      setFiles(fileList);
+
+      const currentDocumentIds = fileList
+        .map((entry: DocumentEntry) => entry.document_id)
+        .filter((id: string | undefined): id is string => typeof id === "string" && id.length > 0);
+
+      setSelectedDocumentIds((prev) => {
+        if (prev.length > 0) {
+          const validPrev = prev.filter((id) => currentDocumentIds.includes(id));
+          return validPrev.length > 0 ? validPrev : currentDocumentIds;
+        }
+        return currentDocumentIds;
+      });
+      return fileList;
+    } catch (err) {
+      console.error("Fetch files error:", err);
+      return null;
+    }
+  };
+
+  // 🔹 Export Report functions
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setUploadStatus(`📋 Copied!`);
+    setTimeout(() => setUploadStatus(""), 2000);
+  };
+
+  const exportToMarkdown = () => {
+    const reportHeader = `# Research Report\nGenerated on: ${new Date().toLocaleString()}\n\n---\n\n`;
+    const chatContent = messages.map(m => 
+      `### ${m.role === 'user' ? 'User' : 'Assistant'}\n${m.content}\n\n${m.sources?.length ? `**Sources:**\n${m.sources.map(s => `- ${typeof s.page === 'number' ? `Page ${s.page}` : `Location ${s.page}`}: ${s.content}`).join('\n')}\n` : ''}`
+    ).join('\n---\n\n');
+    
+    const blob = new Blob([reportHeader + chatContent], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `research_report_${new Date().getTime()}.md`;
+    a.click();
+    setUploadStatus("✅ Markdown Report Downloaded");
+  };
+
+  const exportToPDF = async () => {
+    const element = document.getElementById('chat-container');
+    if (!element) return;
+    
+    setLoading(true);
+    setUploadStatus("⚡ Loading PDF Engines...");
+    
+    try {
+      // 🔹 Dynamically load libraries only in browser
+      const [{ jsPDF }, html2canvas] = await Promise.all([
+        import("jspdf"),
+        import("html2canvas").then(m => m.default)
+      ]);
+
+      setUploadStatus("⚡ Generating PDF Report...");
+      
+      const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`research_report_${new Date().getTime()}.pdf`);
+      setUploadStatus("✅ PDF Report Saved");
+    } catch (err) {
+      console.error("PDF Export error:", err);
+      setUploadStatus("❌ PDF Generation Failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchFiles();
+    setMessages(loadConversation() as Message[]);
+    hasHydratedConversation.current = true;
+  }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    if (hasHydratedConversation.current) saveConversation(messages);
+  }, [messages]);
+
+  useEffect(() => () => abortControllerRef.current?.abort(), []);
+
+  // 🔹 Format File Size
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // 🔹 Delete specific file
+  const deleteFile = async (filename: string) => {
+    try {
+      const res = await fetch("/api/delete_file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename })
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        const message = getErrorMessage(payload, "Delete failed.");
+        setUploadStatus(`❌ ${message}`);
+        return;
+      }
+
+      setUploadStatus(`🗑️ Deleted ${filename}`);
+      await fetchFiles();
+    } catch (err) {
+      console.error("Delete error:", err);
+      setUploadStatus("❌ Delete failed: network error.");
+    }
+  };
+
+  // 🔹 Ask question
+  const askQuestion = async (overrideQuestion?: string) => {
+    const queryText = overrideQuestion || question;
+    if (!queryText.trim()) return;
+
+    const userMessage: Message = { role: "user", content: queryText };
+    setMessages((prev) => [...prev, userMessage]);
+    setQuestion("");
+    setLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = controller;
+
+    try {
+      const res = await fetch("/api/ask", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ 
+          question: userMessage.content,
+          history: messages.map(m => ({ role: m.role, content: m.content })),
+          selected_document_ids: selectedDocumentIds
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(getErrorMessage(payload, "Unable to retrieve an answer."));
+      }
+      
+      setMessages((prev) => [...prev, { role: "assistant", content: "", sources: [] }]);
+      await readSseStream(res, (data: StreamEvent) => {
+        setMessages((prev) => {
+          const newMessages = [...prev];
+          const lastMsg = newMessages.at(-1);
+          if (!lastMsg || lastMsg.role !== "assistant") return prev;
+
+          if (Array.isArray(data.sources)) lastMsg.sources = data.sources as Source[];
+          if (Array.isArray(data.suggestions)) lastMsg.suggestions = data.suggestions;
+          if (data.content) lastMsg.content += data.content;
+          if (data.answer) lastMsg.content = data.answer;
+          if (data.error) lastMsg.error = data.error;
+          return newMessages;
+        });
+      }, controller.signal);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: "",
+        error: error instanceof Error ? error.message : "Error fetching answer. Please try again."
+      }]);
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setLoading(false);
+      }
+    }
+  };
+
+  // 🔹 Clear Database
+  const clearDatabase = async () => {
+    try {
+      setClearing(true);
+      const res = await fetch("/api/clear", { method: "POST" });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        const message = getErrorMessage(payload, "Unable to clear documents.");
+        setUploadStatus(`❌ ${message}`);
+        return;
+      }
+
+      setUploadStatus("🧹 Database cleared!");
+      setMessages([]);
+      clearConversation();
+      await fetchFiles();
+    } catch (err) {
+      console.error(err);
+      setUploadStatus("❌ Clear failed: network error.");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  // 🔹 Upload document
+  const uploadDocument = async () => {
+    if (!file || uploading) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    setUploadStatus("Uploading...");
+    setUploading(true);
+
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+
+      const uploadResult = typeof data === "object" && data !== null
+        ? data as { status?: unknown; document_id?: unknown }
+        : null;
+      const documentId = typeof uploadResult?.document_id === "string"
+        ? uploadResult.document_id.trim()
+        : "";
+      const isCompleted = uploadResult?.status === "completed" || uploadResult?.status === "duplicate";
+
+      if (res.ok && isCompleted && documentId) {
+        setFile(null);
+        const refreshedFiles = await fetchFiles();
+        if (!refreshedFiles?.some((entry) => entry.document_id === documentId)) {
+          setUploadStatus("❌ Upload completed, but the document did not appear in the library. Refresh and try again.");
+          return;
+        }
+        setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
+        setUploadStatus(uploadResult.status === "duplicate"
+          ? "✅ This document is already in your library."
+          : "✅ Document uploaded and indexed successfully.");
+        return;
+      }
+
+      const message = getErrorMessage(data, "Upload failed.");
+      setUploadStatus(`❌ ${message}`);
+    } catch (error) {
+      console.error(error);
+      setUploadStatus("❌ Upload failed: network error. Please try again.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900 p-8 md:p-12 font-sans selection:bg-blue-200">
+      <div className="max-w-5xl mx-auto">
+        <header className="mb-10 text-center md:text-left">
+          <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-gray-900 mb-3">
+            Smart Research Assistant <span className="text-blue-600">🚀</span>
+          </h1>
+          <p className="text-gray-500 text-lg md:text-xl max-w-2xl">Upload your documents and ask intelligent questions to instantly extract insights.</p>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-1 space-y-6">
+            {/* 🔹 Upload Section */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                <Database className="w-5 h-5 mr-2 text-blue-500" />
+                Document Upload
+              </h2>
+
+              <div className="mb-5">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Select a document</label>
+                <div className="relative">
+                  <input
+                    type="file"
+                    accept=".pdf,.docx"
+                    onChange={(e) => {
+                      const nextFile = e.target.files?.[0] || null;
+                      const validation = validateSelectedFile(nextFile);
+
+                      if (!validation.valid) {
+                        setFile(null);
+                        setUploadStatus(`❌ ${validation.message}`);
+                        e.target.value = "";
+                        return;
+                      }
+
+                      setFile(nextFile);
+                      setUploadStatus("");
+                    }}
+                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors cursor-pointer border border-gray-200 rounded-xl"
+                  />
+                </div>
+                <p className="mt-2 text-xs text-gray-500">{SUPPORTED_FORMAT_MESSAGE}</p>
+              </div>
+
+              <button
+                onClick={uploadDocument}
+                disabled={!file || uploading}
+                className={`w-full font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center ${file && !uploading ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 hover:shadow-md transform hover:-translate-y-0.5' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+              >
+                <Plus className="w-5 h-5 mr-2" />
+                Upload Document
+              </button>
+
+              <button
+                onClick={clearDatabase}
+                disabled={clearing}
+                className="w-full mt-3 font-medium py-3 rounded-xl transition-all shadow-sm flex justify-center items-center bg-red-50 text-red-600 hover:bg-red-100 border border-red-100"
+              >
+                <Trash2 className="w-5 h-5 mr-2" />
+                {clearing ? 'Clearing...' : 'Clear Documents'}
+              </button>
+
+                {uploadStatus && (
+                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') || uploadStatus.includes('✅') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') || uploadStatus.includes('❌') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                    { (uploadStatus.includes('success') || uploadStatus.includes('✅')) && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+                    {uploadStatus}
+                  </div>
+                )}
+              </div>
+
+              {/* 🔹 Document Library */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                  <Library className="w-5 h-5 mr-2 text-green-500" />
+                  Document Library
+                </h2>
+                
+                {!files || !Array.isArray(files) || files.length === 0 ? (
+                  <p className="text-gray-400 text-sm italic py-4 text-center">No documents uploaded yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {files.map((f, i) => (
+                      <div key={i} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 group hover:border-blue-200 transition-all">
+                        <label className="flex items-center flex-1 min-w-0 pr-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(f.document_id) && selectedDocumentIds.includes(f.document_id ?? "")}
+                            disabled={!f.document_id || (f.status ?? 'completed') !== 'completed'}
+                            onChange={() => {
+                              if (!f.document_id) return;
+                              if ((f.status ?? 'completed') !== 'completed') return;
+                              setSelectedDocumentIds((prev) => {
+                                if (prev.includes(f.document_id ?? "")) {
+                                  return prev.filter((id) => id !== f.document_id);
+                                }
+                                return [...prev, f.document_id ?? ""];
+                              });
+                            }}
+                            className="mr-3 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
+                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                            <div className="mt-1">
+                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                                f.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                f.status === 'processing' ? 'bg-amber-100 text-amber-700' :
+                                f.status === 'failed' ? 'bg-red-100 text-red-700' :
+                                f.status === 'duplicate' ? 'bg-blue-100 text-blue-700' :
+                                'bg-slate-100 text-slate-600'}
+                              `}>
+                                {f.status ?? 'pending'}
+                              </span>
+                            </div>
+                          </div>
+                        </label>
+                        <button 
+                          onClick={() => deleteFile(f.name)}
+                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                          title="Delete document"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+          </div>
+
+          <div className="lg:col-span-2 space-y-6">
+
+            {/* 🔹 Chat Section */}
+            <div id="chat-container" className="space-y-6 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
+              {messages.length > 0 && (
+                <div className="flex justify-end gap-2 mb-4">
+                  <button onClick={exportToMarkdown} className="flex items-center text-xs font-bold bg-white text-gray-600 px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 shadow-sm transition-all"><Download className="w-3.5 h-3.5 mr-1.5" /> MD</button>
+                  <button onClick={exportToPDF} className="flex items-center text-xs font-bold bg-white text-gray-600 px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 shadow-sm transition-all"><Download className="w-3.5 h-3.5 mr-1.5" /> PDF</button>
+                </div>
+              )}
+              {messages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  {msg.role === 'user' ? (
+                    <div className="bg-purple-600 text-white p-5 rounded-2xl rounded-tr-none max-w-[85%] shadow-sm">
+                      <p className="leading-relaxed">{msg.content}</p>
+                    </div>
+                  ) : (
+                    <div className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-100 max-w-full lg:max-w-[95%]">
+                      {msg.error ? (
+                         <>
+                           <div className="flex items-center mb-4 text-red-600">
+                             <svg className="w-8 h-8 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                             <h2 className="text-xl font-bold tracking-tight">Oops! Something went wrong</h2>
+                           </div>
+                           <div className="p-5 bg-red-50 border border-red-100 rounded-xl text-red-700 font-medium">
+                             {msg.error}
+                           </div>
+                         </>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between mb-5 pb-3 border-b border-gray-100">
+                            <div className="flex items-center">
+                              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mr-4">
+                                <Cpu className="w-6 h-6 text-blue-600" />
+                              </div>
+                              <h2 className="text-xl font-bold text-gray-800 tracking-tight">Answer</h2>
+                            </div>
+                            <button onClick={() => copyToClipboard(msg.content)} className="text-gray-400 hover:text-blue-600 transition-colors p-1.5 rounded-lg hover:bg-blue-50" title="Copy Answer"><Copy className="w-4 h-4" /></button>
+                          </div>
+                          
+                          <div className="prose prose-blue max-w-none text-gray-800 mb-8 overflow-x-auto">
+                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {msg.content}
+                             </ReactMarkdown>
+                          </div>
+
+                          {msg.sources && msg.sources.length > 0 && <SourceCitations citations={msg.sources} onCopy={copyToClipboard} />}
+
+                          {msg.suggestions && msg.suggestions.length > 0 && (
+                            <div className="mt-6">
+                              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 flex items-center">
+                                <svg className="w-3.5 h-3.5 mr-1.5 text-purple-400" fill="currentColor" viewBox="0 0 20 20"><path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.757a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 6.464A1 1 0 106.464 5.05l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zM8 16v-1a1 1 0 112 0v1a1 1 0 11-2 0zM13.464 15.05a1 1 0 010 1.414l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 14a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z" /></svg>
+                                Suggested Follow-ups
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                                        {msg.suggestions.map((s, j) => (
+                                  <button
+                                    key={j}
+                                    onClick={() => askQuestion(s)}
+                                    className="text-sm bg-purple-50 text-purple-700 px-4 py-2 rounded-xl border border-purple-100 hover:bg-purple-100 hover:border-purple-200 transition-all text-left animate-in fade-in slide-in-from-bottom-2 duration-300"
+                                    style={{ animationDelay: `${j * 100}ms` }}
+                                  >
+                                    {s}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* 🔹 Question Section (Relocated) */}
+            <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-100 transition-all hover:shadow-xl relative overflow-hidden group">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 opacity-70"></div>
+              
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                <MessageSquare className="w-5 h-5 mr-2 text-purple-600 animate-pulse" />
+                Ask a follow-up question
+              </h2>
+
+              <div className="relative">
+                <input
+                  className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl p-4 pr-32 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all shadow-inner group-hover:bg-white"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="Ask anything about the document..."
+                  onKeyDown={(e) => e.key === 'Enter' && askQuestion()}
+                />
+                <div className="absolute right-2 top-2">
+                  <button
+                    onClick={() => askQuestion()}
+                    disabled={loading || !question.trim()}
+                    className={`px-8 py-2.5 rounded-lg font-bold transition-all flex items-center shadow-md ${loading || !question.trim() ? 'bg-gray-100 text-gray-400 cursor-not-allowed shadow-none' : 'bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-700 hover:to-blue-700 transform hover:-translate-y-0.5 active:translate-y-0 active:shadow-inner'}`}
+                  >
+                    {loading ? (
+                      <>
+                        <Cpu className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" />
+                        Thinking
+                      </>
+                    ) : (
+                      <>
+                        Send <ChevronRight className="w-4 h-4 ml-1" />
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+              <p className="mt-3 text-xs text-gray-400 text-center italic">Tip: Press Enter to quickly send your question</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
