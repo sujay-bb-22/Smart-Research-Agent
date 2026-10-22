@@ -14,6 +14,59 @@ def test_validate_selected_document_ids_rejects_unknown_ids():
     assert valid == ["doc-a"]
 
 
+def test_validate_selected_document_ids_handles_empty_unknown_duplicate_and_malformed_input():
+    known = {
+        "doc-a": {"document_id": "doc-a", "status": "completed"},
+        "doc-b": {"document_id": "doc-b", "status": "completed"},
+    }
+
+    assert main.validate_selected_document_ids([], known) == []
+    assert main.validate_selected_document_ids(["missing-a", "missing-b"], known) == []
+    assert main.validate_selected_document_ids(
+        [" doc-b ", "doc-a", "doc-b", None, 12, {}], known
+    ) == ["doc-b", "doc-a"]
+    assert main.validate_selected_document_ids("doc-a", known) == []
+    assert main.validate_selected_document_ids(12, known) == []
+    assert main.validate_selected_document_ids([None, 12, {}], {}) == []
+    # An empty registry is a supported legacy mode; valid IDs are still scoped
+    # by their Chroma metadata later in retrieval.
+    assert main.validate_selected_document_ids(["legacy-id"], {}) == ["legacy-id"]
+
+
+def test_validate_selected_document_ids_preserves_legacy_missing_status_and_rejects_deleted():
+    known = {
+        "legacy": {"document_id": "legacy"},
+        "deleted": {"document_id": "deleted", "status": "completed", "deleted": True},
+        "pending": {"document_id": "pending", "status": "pending"},
+    }
+
+    assert main.validate_selected_document_ids(
+        ["legacy", "deleted", "pending"], known
+    ) == ["legacy"]
+
+
+def test_validate_selected_document_ids_enforces_status_and_user_workspace_scope():
+    known = {
+        "pending": {"status": "pending", "user_id": "u1", "workspace_id": "w1"},
+        "processing": {"status": "processing", "user_id": "u1", "workspace_id": "w1"},
+        "completed": {"status": "completed", "user_id": "u1", "workspace_id": "w1"},
+        "failed": {"status": "failed", "user_id": "u1", "workspace_id": "w1"},
+        "other-user": {"status": "completed", "user_id": "u2", "workspace_id": "w1"},
+        "other-workspace": {"status": "completed", "user_id": "u1", "workspace_id": "w2"},
+    }
+
+    assert main.validate_selected_document_ids(
+        list(known), known, user_id="u1", workspace_id="w1"
+    ) == ["completed"]
+
+
+def test_register_document_defaults_to_pending(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    main._register_document("doc-new", "new.pdf", "data/doc-new.pdf")
+
+    assert main._load_document_registry()["doc-new"]["status"] == "pending"
+
+
 def test_validate_selected_document_ids_rejects_non_completed_statuses():
     known = {
         "doc-a": {"document_id": "doc-a", "status": "processing"},

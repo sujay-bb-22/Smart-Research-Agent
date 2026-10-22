@@ -806,7 +806,7 @@ def _build_user_workspace_filter(user_id=None, workspace_id=None):
 
 
 def validate_selected_document_ids(selected_document_ids, registry=None, user_id=None, workspace_id=None):
-    if not selected_document_ids:
+    if not isinstance(selected_document_ids, (list, tuple)) or not selected_document_ids:
         return []
 
     valid_ids = []
@@ -821,9 +821,9 @@ def validate_selected_document_ids(selected_document_ids, registry=None, user_id
     user_scope = _build_user_workspace_filter(user_id, workspace_id)
 
     for document_id in selected_document_ids:
-        if document_id is None:
+        if not isinstance(document_id, str):
             continue
-        candidate = str(document_id).strip()
+        candidate = document_id.strip()
         if not candidate or candidate in seen:
             continue
 
@@ -832,9 +832,13 @@ def validate_selected_document_ids(selected_document_ids, registry=None, user_id
 
         if known_registry_ids:
             record = registry_snapshot.get(candidate, {})
+            if not isinstance(record, dict):
+                continue
             if record.get("deleted"):
                 continue
-            if _normalize_document_status(record.get("status")) != "completed":
+            # Legacy registry entries predate the status field. Keep those
+            # selectable, while enforcing the lifecycle for explicit statuses.
+            if "status" in record and _normalize_document_status(record.get("status")) != "completed":
                 continue
             if user_scope is not None:
                 matches = True
@@ -858,9 +862,6 @@ def validate_selected_document_ids(selected_document_ids, registry=None, user_id
 
         valid_ids.append(candidate)
         seen.add(candidate)
-
-    if not valid_ids and not known_registry_ids:
-        valid_ids = [str(doc_id).strip() for doc_id in selected_document_ids if str(doc_id).strip()]
 
     return valid_ids
 
@@ -951,7 +952,7 @@ def _save_document_registry(registry):
         json.dump(registry, handle, indent=2, sort_keys=True)
 
 
-def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "processed", duplicate_of: str | None = None, user_id: str | None = None, workspace_id: str | None = None):
+def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "pending", duplicate_of: str | None = None, user_id: str | None = None, workspace_id: str | None = None):
     registry = _load_document_registry()
     registry[document_id] = {
         "document_id": document_id,
