@@ -1260,6 +1260,8 @@ def readiness_check():
 
 
 def _prepare_documents_for_indexing(docs, document_id: str, filename: str, user_id: str, workspace_id: str):
+    # Convert incoming chunks to LangChain Document instances before filtering.
+    normalized_docs = _normalize_documents_for_chroma(docs)
     normalized_docs = [
         doc
         for doc in normalized_docs
