@@ -79,6 +79,37 @@ def test_validate_selected_document_ids_rejects_non_completed_statuses():
     assert valid == ["doc-b"]
 
 
+def test_unselected_retrieval_drops_explicitly_unready_registry_documents():
+    ready = type("Doc", (), {"metadata": {"document_id": "ready"}})()
+    pending = type("Doc", (), {"metadata": {"document_id": "pending"}})()
+    legacy = type("Doc", (), {"metadata": {"document_id": "legacy"}})()
+
+    filtered = main._filter_documents_by_ready_status(
+        [ready, pending, legacy],
+        {
+            "ready": {"status": "completed"},
+            "pending": {"status": "processing"},
+            "legacy": {},
+        },
+    )
+
+    assert filtered == [ready, legacy]
+
+
+def test_recovery_finds_persisted_pending_jobs_and_marks_missing_files_failed(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    existing_path = tmp_path / "data" / "ready.pdf"
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_bytes(b"stored")
+    main._register_document("pending-doc", "ready.pdf", str(existing_path), status="pending")
+    main._register_document("lost-doc", "lost.pdf", str(existing_path.parent / "lost.pdf"), status="processing")
+
+    jobs = main._recoverable_document_jobs()
+
+    assert [job["document_id"] for job in jobs] == ["pending-doc"]
+    assert main._load_document_registry()["lost-doc"]["status"] == "failed"
+
+
 def test_summary_question_detection():
     assert main.is_summary_question("Summarize this document for me") is True
     assert main.is_summary_question("What is the main conclusion?") is True

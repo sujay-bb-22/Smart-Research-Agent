@@ -9,6 +9,8 @@ import sqlite3
 import threading
 import time
 import uuid
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -27,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ingest import (
     DocumentParsingError,
+    OCRUnavailableError,
     UnsupportedDocumentError,
     get_pdf_chunks,
     validate_upload_file,
@@ -40,7 +43,23 @@ logger = logging.getLogger("smart_research_agent")
 MAX_UPLOAD_BYTES = settings.max_upload_size
 ALLOWED_ORIGINS = list(settings.cors_origins)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # The registry is the durable job ledger. Resume stored files left pending
+    # by a process restart; deterministic Chroma chunk IDs make retries safe.
+    tasks = []
+    for record in _recoverable_document_jobs():
+        task = asyncio.create_task(asyncio.to_thread(
+            _process_document_upload,
+            record["document_id"], record["path"], record["filename"],
+            record["user_id"], record["workspace_id"], "startup-recovery",
+        ))
+        tasks.append(task)
+    app.state.recovery_tasks = tasks
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -668,6 +687,7 @@ class DocumentListItem(BaseModel):
     size: int
     uploaded_at: float
     status: str
+    error: str | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -703,6 +723,7 @@ def stream_event(event: str, **payload):
 
 
 DOCUMENT_REGISTRY_PATH = os.path.join("data", "documents.json")
+DOCUMENT_REGISTRY_LOCK = threading.RLock()
 
 
 def generate_document_id(filename: str | None = None) -> str:
@@ -898,6 +919,20 @@ def _filter_documents_by_scope(documents, selected_document_ids, user_id=None, w
     return filtered
 
 
+def _filter_documents_by_ready_status(documents, registry=None):
+    registry_snapshot = registry if isinstance(registry, dict) else _load_document_registry()
+    ready = []
+    for doc in documents or []:
+        metadata = getattr(doc, "metadata", {}) or {}
+        record = registry_snapshot.get(metadata.get("document_id"))
+        # Legacy vector entries without a registry record remain queryable; any
+        # explicit lifecycle status must be completed before content is used.
+        if record and "status" in record and _normalize_document_status(record.get("status")) != "completed":
+            continue
+        ready.append(doc)
+    return ready
+
+
 def _call_ingestion_with_metadata(file_path: str, document_id: str, filename: str):
     ingestion_func = get_pdf_chunks
     try:
@@ -934,38 +969,47 @@ def _normalize_documents_for_chroma(docs):
 
 
 def _load_document_registry():
-    if not os.path.exists(DOCUMENT_REGISTRY_PATH):
-        return {}
-
-    try:
-        with open(DOCUMENT_REGISTRY_PATH, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    with DOCUMENT_REGISTRY_LOCK:
+        if not os.path.exists(DOCUMENT_REGISTRY_PATH):
+            return {}
+        try:
+            with open(DOCUMENT_REGISTRY_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.exception("document_registry_read_failed")
+            raise RuntimeError("Document registry is unavailable; refusing to overwrite it.") from exc
 
 
 def _save_document_registry(registry):
     os.makedirs("data", exist_ok=True)
-    with open(DOCUMENT_REGISTRY_PATH, "w", encoding="utf-8") as handle:
-        json.dump(registry, handle, indent=2, sort_keys=True)
+    temp_path = DOCUMENT_REGISTRY_PATH + ".tmp"
+    with DOCUMENT_REGISTRY_LOCK:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(registry, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, DOCUMENT_REGISTRY_PATH)
 
 
 def _register_document(document_id: str, filename: str, physical_path: str, file_hash: str | None = None, status: str = "pending", duplicate_of: str | None = None, user_id: str | None = None, workspace_id: str | None = None):
-    registry = _load_document_registry()
-    registry[document_id] = {
-        "document_id": document_id,
-        "filename": filename,
-        "path": physical_path,
-        "uploaded_at": time.time(),
-        "sha256": file_hash,
-        "status": status,
-        "duplicate_of": duplicate_of,
-        "user_id": user_id or settings.default_user_id,
-        "workspace_id": workspace_id or settings.default_workspace_id,
-    }
-    _save_document_registry(registry)
-    return registry
+    with DOCUMENT_REGISTRY_LOCK:
+        registry = _load_document_registry()
+        registry[document_id] = {
+            "document_id": document_id,
+            "filename": filename,
+            "path": physical_path,
+            "uploaded_at": time.time(),
+            "sha256": file_hash,
+            "status": _normalize_document_status(status),
+            "duplicate_of": duplicate_of,
+            "user_id": user_id or settings.default_user_id,
+            "workspace_id": workspace_id or settings.default_workspace_id,
+        }
+        _save_document_registry(registry)
+        return registry
 
 
 def _find_duplicate_document(file_hash: str | None, user_id: str | None = None, workspace_id: str | None = None):
@@ -1000,19 +1044,51 @@ def _find_document_record_by_filename(filename: str, user_id: str | None = None,
 
 
 def _update_document_registry_entry(document_id: str, **updates):
-    registry = _load_document_registry()
-    record = registry.get(document_id)
-    if record is None:
-        return None
-    record.update(updates)
-    _save_document_registry(registry)
+    started = time.perf_counter()
+    with DOCUMENT_REGISTRY_LOCK:
+        registry = _load_document_registry()
+        record = registry.get(document_id)
+        if record is None:
+            return None
+        record.update(updates)
+        if "status" in updates:
+            record["status"] = _normalize_document_status(updates["status"])
+        _save_document_registry(registry)
+    logger.info("document_registry_updated document_id=%s status=%s duration_ms=%.1f", document_id, record.get("status"), (time.perf_counter() - started) * 1000)
     return record
 
 
 def _remove_document_registry_entry(document_id: str):
+    with DOCUMENT_REGISTRY_LOCK:
+        registry = _load_document_registry()
+        registry.pop(document_id, None)
+        _save_document_registry(registry)
+
+
+def _recoverable_document_jobs():
+    recoverable = []
     registry = _load_document_registry()
-    registry.pop(document_id, None)
-    _save_document_registry(registry)
+    for document_id, record in registry.items():
+        if not isinstance(record, dict) or record.get("deleted"):
+            continue
+        if _normalize_document_status(record.get("status")) not in {"pending", "processing"}:
+            continue
+        path = record.get("path")
+        if not isinstance(path, str) or not os.path.isfile(path):
+            _update_document_registry_entry(
+                document_id, status="failed", error="The uploaded file is unavailable for processing.", failed_at=time.time()
+            )
+            continue
+        recoverable.append({
+            "document_id": document_id,
+            "path": path,
+            "filename": str(record.get("filename") or os.path.basename(path)),
+            "user_id": str(record.get("user_id") or settings.default_user_id),
+            "workspace_id": str(record.get("workspace_id") or settings.default_workspace_id),
+        })
+    if recoverable:
+        logger.info("document_jobs_recovered count=%s", len(recoverable))
+    return recoverable
 
 
 VECTOR_CONFIG_FILENAME = ".smart_research_vector_config.json"
@@ -1190,11 +1266,24 @@ def _build_embedding_function():
 def _validated_embedding_vectors(texts, embedding_function):
     if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
         raise DocumentParsingError("Cannot generate embeddings for empty document chunks.")
-    try:
-        vectors = embedding_function.embed_documents(texts)
-    except Exception as exc:
-        logger.exception("document_embedding_failed chunks=%s", len(texts))
-        raise RuntimeError("Document embedding generation failed.") from exc
+    embedding_started = time.perf_counter()
+    batch_size = 100
+    vectors = []
+    batch_count = math.ceil(len(texts) / batch_size)
+    for batch_index, start in enumerate(range(0, len(texts), batch_size), start=1):
+        batch_texts = texts[start:start + batch_size]
+        try:
+            batch_vectors = embedding_function.embed_documents(batch_texts)
+        except Exception as exc:
+            logger.error(
+                "document_embedding_failed batch=%s batches=%s chunks=%s error_type=%s",
+                batch_index, batch_count, len(texts), type(exc).__name__,
+            )
+            raise RuntimeError("Document embedding generation failed.") from exc
+        if not isinstance(batch_vectors, (list, tuple)) or len(batch_vectors) != len(batch_texts):
+            raise RuntimeError("Embedding service returned an invalid response.")
+        vectors.extend(batch_vectors)
+    embedding_duration_ms = (time.perf_counter() - embedding_started) * 1000
     if not isinstance(vectors, (list, tuple)) or len(vectors) != len(texts):
         raise RuntimeError("Embedding service returned an invalid response.")
     expected_dimension = settings.embedding_dimension
@@ -1213,6 +1302,10 @@ def _validated_embedding_vectors(texts, embedding_function):
         if validated and len(numeric) != len(validated[0]):
             raise RuntimeError("Embedding service returned inconsistent vector dimensions.")
         validated.append(numeric)
+    logger.info(
+        "document_embeddings_generated chunks=%s batches=%s duration_ms=%.1f",
+        len(texts), batch_count, embedding_duration_ms,
+    )
     return validated
 
 
@@ -1317,7 +1410,7 @@ def _prepare_documents_for_indexing(docs, document_id: str, filename: str, user_
     return normalized_docs
 
 
-def index_document_chunks(normalized_docs, document_id: str, request_id: str | None = None):
+def index_document_chunks(normalized_docs, document_id: str, request_id: str | None = None, require_registered: bool = False):
     if not normalized_docs:
         raise DocumentParsingError(
             "Cannot index this document because it contains no readable text chunks."
@@ -1326,6 +1419,10 @@ def index_document_chunks(normalized_docs, document_id: str, request_id: str | N
 
     started = time.perf_counter()
     with VECTOR_STORE_LOCK:
+        if require_registered:
+            record = _load_document_registry().get(document_id)
+            if not record or record.get("deleted") or _normalize_document_status(record.get("status")) != "processing":
+                raise RuntimeError("Document is no longer available for indexing.")
         if embeddings is None or db is None:
             load_db()
 
@@ -1335,28 +1432,37 @@ def index_document_chunks(normalized_docs, document_id: str, request_id: str | N
         expected_config = _active_embedding_config(embeddings)
         ensure_vector_store_compatible(settings.vector_store_path, expected_config, allow_reset=False)
 
-        if hasattr(db, "add_embeddings"):
-            metadatas = [dict(doc.metadata or {}) for doc in normalized_docs]
-            ids = [str(meta.get("chunk_id") or f"{document_id}-chunk-{index:03d}")
-                   for index, meta in enumerate(metadatas, start=1)]
-            db.add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas, ids=ids)
-        elif db is None:
-            db = Chroma.from_documents(
-                normalized_docs,
-                embeddings,
-                persist_directory=settings.vector_store_path,
-            )
+        insertion_started = time.perf_counter()
+        metadatas = [dict(doc.metadata or {}) for doc in normalized_docs]
+        ids = [str(meta.get("chunk_id") or f"{document_id}-chunk-{index:03d}")
+               for index, meta in enumerate(metadatas, start=1)]
+        if db is None:
+            db = Chroma(persist_directory=settings.vector_store_path, embedding_function=embeddings)
             retriever = db.as_retriever(search_kwargs={"k": settings.default_k})
-            if isinstance(db, Chroma):
-                db.documents = list(normalized_docs)
+            db.documents = []
+        if callable(getattr(db, "add_embeddings", None)):
+            db.add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas, ids=ids)
+        elif isinstance(db, Chroma):
+            # The installed langchain-community Chroma wrapper lacks
+            # add_embeddings; write validated vectors directly to its collection
+            # to avoid invoking the embedding provider a second time.
+            db._collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
         else:
             db.add_documents(normalized_docs)
-            if isinstance(db, Chroma):
-                prior_documents = list(getattr(db, "documents", []))
-                db.documents = prior_documents + list(normalized_docs)
+
+        if isinstance(db, Chroma):
+            prior_documents = list(getattr(db, "documents", []))
+            db.documents = prior_documents + list(normalized_docs)
+            stored = db.get(where={"document_id": document_id}, include=["metadatas"])
+            if len(stored.get("ids", [])) < len(normalized_docs):
+                raise RuntimeError("Vector store did not confirm all document chunks.")
 
         _write_vector_config(settings.vector_store_path, expected_config)
         lexical_index.add_documents(normalized_docs)
+        logger.info(
+            "document_vectors_inserted document_id=%s chunks=%s duration_ms=%.1f",
+            document_id, len(normalized_docs), (time.perf_counter() - insertion_started) * 1000,
+        )
 
     logger.info(
         "document_indexed request_id=%s document_id=%s chunks=%s duration_ms=%.1f",
@@ -1389,21 +1495,39 @@ def _extract_page_count(docs) -> int | None:
     return None
 
 
-def _process_document_upload(document_id: str, file_path: str, filename: str, user_id: str, workspace_id: str, request_id: str | None = None):
-    ingestion_started = time.perf_counter()
-    _update_document_registry_entry(document_id, status="processing", error=None)
+def _rollback_document_index(document_id: str):
     try:
+        with VECTOR_STORE_LOCK:
+            if db is not None:
+                db.delete(where={"document_id": document_id})
+                lexical_index.rebuild(_load_documents_from_vector_store(db))
+    except Exception:
+        logger.exception("partial_document_index_cleanup_failed document_id=%s", document_id)
+
+
+def _process_document_upload(document_id: str, file_path: str, filename: str, user_id: str, workspace_id: str, request_id: str | None = None):
+    processing_started = time.perf_counter()
+    indexing_started = False
+    try:
+        _update_document_registry_entry(document_id, status="processing", error=None, processing_started_at=time.time())
+        extraction_started = time.perf_counter()
         docs = _call_ingestion_with_metadata(file_path, document_id, filename)
         logger.info(
-            "document_ingested request_id=%s document_id=%s chunks=%s duration_ms=%.1f",
+            "document_extracted request_id=%s document_id=%s extracted_documents=%s duration_ms=%.1f",
             request_id,
             document_id,
             len(docs or []),
-            (time.perf_counter() - ingestion_started) * 1000,
+            (time.perf_counter() - extraction_started) * 1000,
         )
+        chunk_started = time.perf_counter()
         normalized_docs = _prepare_documents_for_indexing(docs, document_id, filename, user_id, workspace_id)
+        logger.info(
+            "document_chunks_validated request_id=%s document_id=%s chunks=%s duration_ms=%.1f",
+            request_id, document_id, len(normalized_docs), (time.perf_counter() - chunk_started) * 1000,
+        )
         page_count = _extract_page_count(normalized_docs)
-        index_document_chunks(normalized_docs, document_id, request_id=request_id)
+        indexing_started = True
+        index_document_chunks(normalized_docs, document_id, request_id=request_id, require_registered=True)
         _update_document_registry_entry(
             document_id,
             status="completed",
@@ -1412,8 +1536,14 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             chunk_count=len(normalized_docs),
             completed_at=time.time(),
         )
+        logger.info(
+            "document_processing_completed request_id=%s document_id=%s pages=%s chunks=%s total_duration_ms=%.1f",
+            request_id, document_id, page_count, len(normalized_docs), (time.perf_counter() - processing_started) * 1000,
+        )
         return
     except (UnsupportedDocumentError, DocumentParsingError, ValueError) as exc:
+        if indexing_started:
+            _rollback_document_index(document_id)
         logger.exception(
             "document_processing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
             request_id,
@@ -1422,9 +1552,19 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             user_id,
             workspace_id,
         )
-        _update_document_registry_entry(document_id, status="failed", error=str(exc), failed_at=time.time())
-        raise
+        if isinstance(exc, OCRUnavailableError):
+            public_error = "This document contains scanned pages, but OCR is currently unavailable."
+        elif isinstance(exc, DocumentParsingError) and "no readable" in str(exc).lower():
+            public_error = "No readable text was found in this document."
+        elif isinstance(exc, UnsupportedDocumentError):
+            public_error = "This document format is not supported. Supported formats: PDF, DOCX."
+        else:
+            public_error = "The document could not be read or processed."
+        _update_document_registry_entry(document_id, status="failed", error=public_error, failed_at=time.time())
+        logger.info("document_processing_failed_total request_id=%s document_id=%s duration_ms=%.1f", request_id, document_id, (time.perf_counter() - processing_started) * 1000)
     except Exception as exc:
+        if indexing_started:
+            _rollback_document_index(document_id)
         logger.exception(
             "document_indexing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
             request_id,
@@ -1433,12 +1573,18 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             user_id,
             workspace_id,
         )
-        _update_document_registry_entry(document_id, status="failed", error="Document indexing failed.", failed_at=time.time())
-        raise RuntimeError("Document indexing failed.") from exc
+        if "embedding" in str(exc).lower():
+            public_error = "The document could not be indexed because text processing failed. Please try again later."
+        else:
+            public_error = "The document was uploaded but could not be indexed."
+        _update_document_registry_entry(document_id, status="failed", error=public_error, failed_at=time.time())
+        logger.info("document_processing_failed_total request_id=%s document_id=%s duration_ms=%.1f", request_id, document_id, (time.perf_counter() - processing_started) * 1000)
 
 
 @app.post("/upload", response_model=UploadResponse, status_code=status.HTTP_200_OK)
-async def upload_pdf(request: Request, file: UploadFile = File(None)):
+async def upload_pdf(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(None)):
+    upload_started = time.perf_counter()
+    received_at = time.perf_counter()
     if file is None or file.filename is None or not file.filename.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1456,6 +1602,10 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
     # Cap memory use while still giving validation a byte buffer for the
     # supported PDF/DOCX formats.
     file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    logger.info(
+        "upload_file_read request_id=%s bytes=%s duration_ms=%.1f",
+        getattr(request.state, "request_id", None), len(file_bytes), (time.perf_counter() - received_at) * 1000,
+    )
     if not file_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1478,11 +1628,12 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
     duplicate_record = _find_duplicate_document(file_sha256, user_id=user_id, workspace_id=workspace_id)
     if duplicate_record and duplicate_record.get("document_id"):
         duplicate_id = duplicate_record.get("document_id")
+        existing_status = _normalize_document_status(duplicate_record.get("status"))
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "message": "Document content already exists.",
-                "status": "duplicate",
+                "status": "duplicate" if existing_status == "completed" else existing_status,
                 "document_id": duplicate_id,
                 "duplicate_of": duplicate_id,
                 "filename": duplicate_record.get("filename", sanitized_filename),
@@ -1494,17 +1645,8 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
     safe_storage_name = f"{document_id}{extension}"
     file_path = os.path.join("data", safe_storage_name)
 
-    _register_document(
-        document_id,
-        file.filename,
-        file_path,
-        file_hash=file_sha256,
-        status="pending",
-        duplicate_of=None,
-        user_id=user_id,
-        workspace_id=workspace_id,
-    )
-
+    storage_started = time.perf_counter()
+    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
     try:
         with open(file_path, "wb") as buffer:
             buffer.write(file_bytes)
@@ -1515,25 +1657,50 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
             detail="Unable to save uploaded file.",
         ) from exc
 
-    _update_document_registry_entry(document_id, status="processing", error=None)
     try:
-        _process_document_upload(
+        _register_document(
             document_id,
-            file_path,
             file.filename,
-            user_id,
-            workspace_id,
-            getattr(request.state, "request_id", None),
+            file_path,
+            file_hash=file_sha256,
+            status="pending",
+            duplicate_of=None,
+            user_id=user_id,
+            workspace_id=workspace_id,
         )
-    except Exception as exc:
+    except OSError as exc:
+        try:
+            os.remove(file_path)
+        except OSError:
+            logger.exception("orphan_upload_cleanup_failed document_id=%s", document_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc) or "Document indexing failed.",
+            detail="Unable to record uploaded file.",
         ) from exc
 
+    logger.info(
+        "upload_file_stored request_id=%s document_id=%s bytes=%s duration_ms=%.1f",
+        getattr(request.state, "request_id", None), document_id, len(file_bytes),
+        (time.perf_counter() - storage_started) * 1000,
+    )
+    background_tasks.add_task(
+        _process_document_upload,
+        document_id,
+        file_path,
+        file.filename,
+        user_id,
+        workspace_id,
+        getattr(request.state, "request_id", None),
+    )
+    logger.info(
+        "upload_acknowledged request_id=%s document_id=%s total_duration_ms=%.1f",
+        getattr(request.state, "request_id", None), document_id,
+        (time.perf_counter() - upload_started) * 1000,
+    )
+
     return {
-        "message": "Document uploaded and indexed successfully",
-        "status": "completed",
+        "message": "Document uploaded and is being processed.",
+        "status": "pending",
         "document_id": document_id,
         "filename": file.filename,
     }
@@ -1583,6 +1750,7 @@ def list_files(request: Request):
                     "size": size,
                     "uploaded_at": uploaded_at,
                     "status": _normalize_document_status(record.get("status")),
+                    "error": record.get("error"),
                 })
 
         return {"files": files}
@@ -1654,6 +1822,7 @@ def delete_file(payload: DeleteRequest, http_request: Request):
             detail=f"Document '{filename}' not found.",
         )
 
+    VECTOR_STORE_LOCK.acquire()
     try:
         if db is not None:
             doc_id = None
@@ -1686,12 +1855,15 @@ def delete_file(payload: DeleteRequest, http_request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unexpected deletion failure.",
         ) from exc
+    finally:
+        VECTOR_STORE_LOCK.release()
 
 
 @app.post("/clear", response_model=ClearResponse)
 def clear_db(request: Request):
     global db, retriever
 
+    VECTOR_STORE_LOCK.acquire()
     try:
         user_id, workspace_id = _get_user_workspace_context(request)
         if db is not None:
@@ -1740,6 +1912,8 @@ def clear_db(request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unexpected database clear failure.",
         ) from exc
+    finally:
+        VECTOR_STORE_LOCK.release()
 
 
 def _record_for_document(document_id: str | None):
@@ -1980,6 +2154,7 @@ async def ask_question(http_request: Request, payload: QueryRequest):
         ) from exc
 
     docs = _filter_documents_by_scope(docs, selected_document_ids, user_id=user_id, workspace_id=workspace_id)
+    docs = _filter_documents_by_ready_status(docs, registry)
     filtered_documents = []
     for doc in docs:
         metadata = getattr(doc, "metadata", {}) or {}

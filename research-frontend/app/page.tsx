@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -37,6 +37,7 @@ type DocumentEntry = {
   size: number;
   uploaded_at: number;
   status?: "pending" | "processing" | "completed" | "failed" | "duplicate";
+  error?: string | null;
 };
 
 const isDocumentEntry = (value: unknown): value is DocumentEntry => {
@@ -121,6 +122,7 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [trackedUploadId, setTrackedUploadId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [files, setFiles] = useState<DocumentEntry[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
@@ -128,8 +130,7 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const hasHydratedConversation = useRef(false);
 
-  // ðŸ”¹ Fetch files
-  const fetchFiles = async (): Promise<DocumentEntry[] | null> => {
+  const fetchFiles = useCallback(async (): Promise<DocumentEntry[] | null> => {
     try {
       const res = await fetch("/api/files");
       if (!res.ok) {
@@ -142,6 +143,7 @@ export default function Home() {
       setFiles(fileList);
 
       const currentDocumentIds = fileList
+        .filter((entry) => entry.status === "completed")
         .map((entry: DocumentEntry) => entry.document_id)
         .filter((id: string | undefined): id is string => typeof id === "string" && id.length > 0);
 
@@ -157,12 +159,12 @@ export default function Home() {
       console.error("Fetch files error:", err);
       return null;
     }
-  };
+  }, []);
 
-  // ðŸ”¹ Export Report functions
+  // Export report functions
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    setUploadStatus(`ðŸ“‹ Copied!`);
+    setUploadStatus("Copied.");
     setTimeout(() => setUploadStatus(""), 2000);
   };
 
@@ -178,7 +180,7 @@ export default function Home() {
     a.href = url;
     a.download = `research_report_${new Date().getTime()}.md`;
     a.click();
-    setUploadStatus("âœ… Markdown Report Downloaded");
+    setUploadStatus("Markdown report downloaded.");
   };
 
   const exportToPDF = async () => {
@@ -186,16 +188,16 @@ export default function Home() {
     if (!element) return;
     
     setLoading(true);
-    setUploadStatus("âš¡ Loading PDF Engines...");
+    setUploadStatus("Loading PDF export tools...");
     
     try {
-      // ðŸ”¹ Dynamically load libraries only in browser
+      // Load browser-only export libraries on demand.
       const [{ jsPDF }, html2canvas] = await Promise.all([
         import("jspdf"),
         import("html2canvas").then(m => m.default)
       ]);
 
-      setUploadStatus("âš¡ Generating PDF Report...");
+      setUploadStatus("Generating PDF report...");
       
       const canvas = await html2canvas(element, { scale: 2, useCORS: true });
       const imgData = canvas.toDataURL('image/png');
@@ -206,20 +208,40 @@ export default function Home() {
       
       pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`research_report_${new Date().getTime()}.pdf`);
-      setUploadStatus("âœ… PDF Report Saved");
+      setUploadStatus("PDF report saved.");
     } catch (err) {
       console.error("PDF Export error:", err);
-      setUploadStatus("âŒ PDF Generation Failed");
+      setUploadStatus("PDF generation failed.");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchFiles();
+    void fetchFiles();
     setMessages(loadConversation() as Message[]);
     hasHydratedConversation.current = true;
-  }, []);
+  }, [fetchFiles]);
+
+  useEffect(() => {
+    if (!files.some((entry) => entry.status === "pending" || entry.status === "processing")) return;
+    const poll = window.setInterval(() => { void fetchFiles(); }, 3000);
+    return () => window.clearInterval(poll);
+  }, [files, fetchFiles]);
+
+  useEffect(() => {
+    if (!trackedUploadId) return;
+    const entry = files.find((item) => item.document_id === trackedUploadId);
+    if (!entry) return;
+    if (entry.status === "completed") {
+      setUploadStatus("Document uploaded and indexed successfully.");
+      setSelectedDocumentIds((previous) => previous.includes(trackedUploadId) ? previous : [...previous, trackedUploadId]);
+      setTrackedUploadId(null);
+    } else if (entry.status === "failed") {
+      setUploadStatus(entry.error || "The document was uploaded but could not be indexed.");
+      setTrackedUploadId(null);
+    }
+  }, [files, trackedUploadId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -231,7 +253,7 @@ export default function Home() {
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
-  // ðŸ”¹ Format File Size
+  // Format file size.
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -240,7 +262,7 @@ export default function Home() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  // ðŸ”¹ Delete specific file
+  // Delete a selected file.
   const deleteFile = async (file: DocumentEntry) => {
     try {
       const res = await fetch("/api/delete_file", {
@@ -252,19 +274,19 @@ export default function Home() {
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
         const message = getErrorMessage(payload, "Delete failed.");
-        setUploadStatus(`âŒ ${message}`);
+        setUploadStatus(message);
         return;
       }
 
-      setUploadStatus(`ðŸ—‘ï¸ Deleted ${file.name}`);
+      setUploadStatus(`Deleted ${file.name}.`);
       await fetchFiles();
     } catch (err) {
       console.error("Delete error:", err);
-      setUploadStatus("âŒ Delete failed: network error.");
+      setUploadStatus("Delete failed: network error.");
     }
   };
 
-  // ðŸ”¹ Ask question
+  // Ask a question.
   const askQuestion = async (overrideQuestion?: string) => {
     const queryText = overrideQuestion || question;
     if (!queryText.trim()) return;
@@ -326,7 +348,7 @@ export default function Home() {
     }
   };
 
-  // ðŸ”¹ Clear Database
+  // Clear the document library.
   const clearDatabase = async () => {
     try {
       setClearing(true);
@@ -335,26 +357,27 @@ export default function Home() {
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
         const message = getErrorMessage(payload, "Unable to clear documents.");
-        setUploadStatus(`âŒ ${message}`);
+        setUploadStatus(message);
         return;
       }
 
-      setUploadStatus("ðŸ§¹ Database cleared!");
+      setUploadStatus("Document library cleared.");
       setMessages([]);
       clearConversation();
       await fetchFiles();
     } catch (err) {
       console.error(err);
-      setUploadStatus("âŒ Clear failed: network error.");
+      setUploadStatus("Clear failed: network error.");
     } finally {
       setClearing(false);
     }
   };
 
-  // ðŸ”¹ Upload document
+  // Upload and track a document.
   const uploadDocument = async () => {
     if (!file || uploading) return;
 
+    setTrackedUploadId(null);
     const formData = new FormData();
     formData.append("file", file);
 
@@ -380,27 +403,37 @@ export default function Home() {
       const documentId = typeof uploadResult?.document_id === "string"
         ? uploadResult.document_id.trim()
         : "";
-      const isCompleted = uploadResult?.status === "completed" || uploadResult?.status === "duplicate";
-
-      if (res.ok && isCompleted && documentId) {
+      const acceptedStatuses = ["pending", "processing", "completed", "duplicate"];
+      if (res.ok && uploadResult && acceptedStatuses.includes(String(uploadResult.status)) && documentId) {
         setFile(null);
         const refreshedFiles = await fetchFiles();
         if (!refreshedFiles?.some((entry) => entry.document_id === documentId)) {
-          setUploadStatus("âŒ Upload completed, but the document did not appear in the library. Refresh and try again.");
+          setUploadStatus("The upload was accepted, but the document is not visible yet. Refresh the library.");
           return;
         }
-        setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
-        setUploadStatus(uploadResult.status === "duplicate"
-          ? "âœ… This document is already in your library."
-          : "âœ… Document uploaded and indexed successfully.");
+        const entry = refreshedFiles.find((item) => item.document_id === documentId);
+        if (uploadResult.status === "duplicate") {
+          if (entry?.status === "completed") {
+            setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
+          }
+          setUploadStatus("This document is already in your library.");
+        } else if (entry?.status === "completed") {
+          setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
+          setUploadStatus("Document uploaded and indexed successfully.");
+        } else if (entry?.status === "failed") {
+          setUploadStatus(entry.error || "The document was uploaded but could not be indexed.");
+        } else {
+          setTrackedUploadId(documentId);
+          setUploadStatus("Document uploaded. Indexing is in progress.");
+        }
         return;
       }
 
       const message = getErrorMessage(data, "Upload failed.");
-      setUploadStatus(`âŒ ${message}`);
+      setUploadStatus(message);
     } catch (error) {
       console.error(error);
-      setUploadStatus("âŒ Upload failed: network error. Please try again.");
+      setUploadStatus("Upload failed: network error. Please try again.");
     } finally {
       setUploading(false);
     }
@@ -411,14 +444,14 @@ export default function Home() {
       <div className="max-w-5xl mx-auto">
         <header className="mb-10 text-center md:text-left">
           <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-gray-900 mb-3">
-            Smart Research Assistant <span className="text-blue-600">ðŸš€</span>
+            Smart Research Assistant
           </h1>
           <p className="text-gray-500 text-lg md:text-xl max-w-2xl">Upload your documents and ask intelligent questions to instantly extract insights.</p>
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-1 space-y-6">
-            {/* ðŸ”¹ Upload Section */}
+            {/* Upload section */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
                 <Database className="w-5 h-5 mr-2 text-blue-500" />
@@ -437,7 +470,7 @@ export default function Home() {
 
                       if (!validation.valid) {
                         setFile(null);
-                        setUploadStatus(`âŒ ${validation.message}`);
+                        setUploadStatus(validation.message);
                         e.target.value = "";
                         return;
                       }
@@ -470,14 +503,14 @@ export default function Home() {
               </button>
 
                 {uploadStatus && (
-                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') || uploadStatus.includes('âœ…') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') || uploadStatus.includes('âŒ') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
-                    { (uploadStatus.includes('success') || uploadStatus.includes('âœ…')) && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('successfully') || uploadStatus.includes('already in your library') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.toLowerCase().includes('failed') || uploadStatus.toLowerCase().includes('could not') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                    {uploadStatus.includes('successfully') && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
                     {uploadStatus}
                   </div>
                 )}
               </div>
 
-              {/* ðŸ”¹ Document Library */}
+              {/* Document library */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
                 <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
                   <Library className="w-5 h-5 mr-2 text-green-500" />
@@ -509,9 +542,9 @@ export default function Home() {
                           />
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
-                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} â€¢ {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} | {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
                             <div className="mt-1">
-                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                              <span title={f.error || undefined} className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
                                 f.status === 'completed' ? 'bg-green-100 text-green-700' :
                                 f.status === 'processing' ? 'bg-amber-100 text-amber-700' :
                                 f.status === 'failed' ? 'bg-red-100 text-red-700' :
@@ -520,6 +553,7 @@ export default function Home() {
                               `}>
                                 {f.status ?? 'pending'}
                               </span>
+                              {f.status === 'failed' && f.error && <p className="mt-1 text-xs text-red-600">{f.error}</p>}
                             </div>
                           </div>
                         </label>
@@ -539,7 +573,7 @@ export default function Home() {
 
           <div className="lg:col-span-2 space-y-6">
 
-            {/* ðŸ”¹ Chat Section */}
+              {/* Chat section */}
             <div id="chat-container" className="space-y-6 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
               {messages.length > 0 && (
                 <div className="flex justify-end gap-2 mb-4">
@@ -614,7 +648,7 @@ export default function Home() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* ðŸ”¹ Question Section (Relocated) */}
+              {/* Question section */}
             <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-100 transition-all hover:shadow-xl relative overflow-hidden group">
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 opacity-70"></div>
               

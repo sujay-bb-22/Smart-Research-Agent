@@ -24,6 +24,10 @@ class AppConfig:
     rerank_candidate_multiplier: int = int(os.getenv("RERANK_CANDIDATE_MULTIPLIER", "3"))
     summary_group_size: int = int(os.getenv("SUMMARY_GROUP_SIZE", "12"))
     max_upload_size: int = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024)))
+    max_document_pages: int = int(os.getenv("MAX_DOCUMENT_PAGES", "250"))
+    ocr_timeout_seconds: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "20"))
+    ocr_total_timeout_seconds: int = int(os.getenv("OCR_TOTAL_TIMEOUT_SECONDS", "120"))
+    ocr_max_image_pixels: int = int(os.getenv("OCR_MAX_IMAGE_PIXELS", "12000000"))
     cors_origins: tuple[str, ...] = tuple(
         origin.strip()
         for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")

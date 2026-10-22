@@ -80,7 +80,7 @@ def test_upload_library_and_chat_share_default_document_scope(monkeypatch, tmp_p
 
     assert upload.status_code == 200, upload.text
     document_id = upload.json()["document_id"]
-    assert upload.json()["status"] == "completed"
+    assert upload.json()["status"] == "pending"
 
     library = client.get("/files")
     assert library.status_code == 200

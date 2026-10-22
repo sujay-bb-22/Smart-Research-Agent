@@ -27,15 +27,16 @@ def test_pdf_ocr_recovers_text_for_scanned_image_page(monkeypatch, tmp_path):
     path.write_bytes(b"placeholder")
 
     class Page:
+        rect = SimpleNamespace(width=612, height=792)
+
         def get_images(self, full=True):
             return [(1,)]
 
-        def get_textpage_ocr(self, **kwargs):
-            return "ocr-page"
+        def get_text(self, *_):
+            return ""
 
-        def get_text(self, textpage=None):
-            assert textpage == "ocr-page"
-            return "Scanned PDF text recovered"
+        def get_pixmap(self, **kwargs):
+            return SimpleNamespace(tobytes=lambda _: b"rendered-image")
 
     class Pdf:
         def __enter__(self):
@@ -47,10 +48,35 @@ def test_pdf_ocr_recovers_text_for_scanned_image_page(monkeypatch, tmp_path):
     import pymupdf
     monkeypatch.setattr(ingest, "PyMuPDFLoader", lambda _: SimpleNamespace(load=lambda: [SimpleNamespace(page_content="", metadata={"page": 0})]))
     monkeypatch.setattr(pymupdf, "open", lambda _: Pdf())
+    monkeypatch.setattr(ingest, "_ocr_image", lambda _: "Scanned PDF text recovered")
 
     docs = ingest._load_pdf_with_ocr(str(path))
 
     assert docs[0].page_content == "Scanned PDF text recovered"
+
+
+def test_text_pdf_does_not_open_ocr_renderer(monkeypatch, tmp_path):
+    path = tmp_path / "text.pdf"
+    path.write_bytes(b"placeholder")
+    class TextPage:
+        def get_text(self, *_):
+            return "A" * 100
+
+        def get_images(self, full=True):
+            return []
+
+    class Pdf:
+        def __enter__(self):
+            return [TextPage()]
+
+        def __exit__(self, *args):
+            return False
+
+    import pymupdf
+    monkeypatch.setattr(pymupdf, "open", lambda _: Pdf())
+
+    docs = ingest._load_pdf_with_ocr(str(path))
+    assert docs[0].page_content == "A" * 100
 
 
 class ValidEmbedding:
@@ -68,6 +94,22 @@ def test_embedding_response_validation_rejects_bad_vectors(monkeypatch, vectors)
 def test_embedding_response_validation_accepts_finite_vectors(monkeypatch):
     monkeypatch.setattr(main.settings, "embedding_dimension", 2)
     assert main._validated_embedding_vectors(["chunk"], ValidEmbedding()) == [[0.1, 0.2]]
+
+
+def test_embedding_requests_are_batched_at_provider_limit_and_keep_order(monkeypatch):
+    monkeypatch.setattr(main.settings, "embedding_dimension", None)
+    calls = []
+
+    class BatchEmbedding:
+        def embed_documents(self, texts):
+            calls.append(list(texts))
+            return [[float(int(text))] for text in texts]
+
+    texts = [str(index) for index in range(101)]
+    vectors = main._validated_embedding_vectors(texts, BatchEmbedding())
+
+    assert [len(batch) for batch in calls] == [100, 1]
+    assert vectors == [[float(index)] for index in range(101)]
 
 
 def test_embedding_initialization_requires_google_credentials(monkeypatch):

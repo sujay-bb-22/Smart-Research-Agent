@@ -110,9 +110,10 @@ def test_upload_success_returns_200(monkeypatch):
     )
 
     assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == "pending"
 
 
-def test_upload_server_failure_returns_500(monkeypatch):
+def test_upload_acknowledges_and_persists_indexing_failure(monkeypatch):
     def fake_load_db():
         raise RuntimeError("embedding init failed")
 
@@ -128,7 +129,11 @@ def test_upload_server_failure_returns_500(monkeypatch):
         files={"file": ("sample.pdf", b"%PDF-1.4", "application/pdf")},
     )
 
-    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == "pending"
+    record = main._load_document_registry()[response.json()["document_id"]]
+    assert record["status"] == "failed"
+    assert record["error"] == "The document could not be indexed because text processing failed. Please try again later."
 
 
 def test_delete_missing_file_returns_404():
