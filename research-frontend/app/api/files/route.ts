@@ -1,9 +1,10 @@
-import { backendError, backendHeaders } from "../../lib/backend";
+import { backendError, backendHeaders, backendUrlOrError } from "../../lib/backend";
 
 export async function GET(req: Request) {
+    const backend = backendUrlOrError();
+    if (backend.response) return backend.response;
     try {
-        const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-        const res = await fetch(`${BACKEND_URL}/files`, {
+        const res = await fetch(`${backend.url}/files`, {
             cache: "no-store",
             headers: backendHeaders(req),
         });

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
@@ -128,7 +128,7 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const hasHydratedConversation = useRef(false);
 
-  // 🔹 Fetch files
+  // ðŸ”¹ Fetch files
   const fetchFiles = async (): Promise<DocumentEntry[] | null> => {
     try {
       const res = await fetch("/api/files");
@@ -159,10 +159,10 @@ export default function Home() {
     }
   };
 
-  // 🔹 Export Report functions
+  // ðŸ”¹ Export Report functions
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    setUploadStatus(`📋 Copied!`);
+    setUploadStatus(`ðŸ“‹ Copied!`);
     setTimeout(() => setUploadStatus(""), 2000);
   };
 
@@ -178,7 +178,7 @@ export default function Home() {
     a.href = url;
     a.download = `research_report_${new Date().getTime()}.md`;
     a.click();
-    setUploadStatus("✅ Markdown Report Downloaded");
+    setUploadStatus("âœ… Markdown Report Downloaded");
   };
 
   const exportToPDF = async () => {
@@ -186,16 +186,16 @@ export default function Home() {
     if (!element) return;
     
     setLoading(true);
-    setUploadStatus("⚡ Loading PDF Engines...");
+    setUploadStatus("âš¡ Loading PDF Engines...");
     
     try {
-      // 🔹 Dynamically load libraries only in browser
+      // ðŸ”¹ Dynamically load libraries only in browser
       const [{ jsPDF }, html2canvas] = await Promise.all([
         import("jspdf"),
         import("html2canvas").then(m => m.default)
       ]);
 
-      setUploadStatus("⚡ Generating PDF Report...");
+      setUploadStatus("âš¡ Generating PDF Report...");
       
       const canvas = await html2canvas(element, { scale: 2, useCORS: true });
       const imgData = canvas.toDataURL('image/png');
@@ -206,10 +206,10 @@ export default function Home() {
       
       pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`research_report_${new Date().getTime()}.pdf`);
-      setUploadStatus("✅ PDF Report Saved");
+      setUploadStatus("âœ… PDF Report Saved");
     } catch (err) {
       console.error("PDF Export error:", err);
-      setUploadStatus("❌ PDF Generation Failed");
+      setUploadStatus("âŒ PDF Generation Failed");
     } finally {
       setLoading(false);
     }
@@ -231,7 +231,7 @@ export default function Home() {
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
-  // 🔹 Format File Size
+  // ðŸ”¹ Format File Size
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -240,31 +240,31 @@ export default function Home() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  // 🔹 Delete specific file
-  const deleteFile = async (filename: string) => {
+  // ðŸ”¹ Delete specific file
+  const deleteFile = async (file: DocumentEntry) => {
     try {
       const res = await fetch("/api/delete_file", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename })
+        body: JSON.stringify({ filename: file.name, document_id: file.document_id })
       });
 
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
         const message = getErrorMessage(payload, "Delete failed.");
-        setUploadStatus(`❌ ${message}`);
+        setUploadStatus(`âŒ ${message}`);
         return;
       }
 
-      setUploadStatus(`🗑️ Deleted ${filename}`);
+      setUploadStatus(`ðŸ—‘ï¸ Deleted ${file.name}`);
       await fetchFiles();
     } catch (err) {
       console.error("Delete error:", err);
-      setUploadStatus("❌ Delete failed: network error.");
+      setUploadStatus("âŒ Delete failed: network error.");
     }
   };
 
-  // 🔹 Ask question
+  // ðŸ”¹ Ask question
   const askQuestion = async (overrideQuestion?: string) => {
     const queryText = overrideQuestion || question;
     if (!queryText.trim()) return;
@@ -326,7 +326,7 @@ export default function Home() {
     }
   };
 
-  // 🔹 Clear Database
+  // ðŸ”¹ Clear Database
   const clearDatabase = async () => {
     try {
       setClearing(true);
@@ -335,23 +335,23 @@ export default function Home() {
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
         const message = getErrorMessage(payload, "Unable to clear documents.");
-        setUploadStatus(`❌ ${message}`);
+        setUploadStatus(`âŒ ${message}`);
         return;
       }
 
-      setUploadStatus("🧹 Database cleared!");
+      setUploadStatus("ðŸ§¹ Database cleared!");
       setMessages([]);
       clearConversation();
       await fetchFiles();
     } catch (err) {
       console.error(err);
-      setUploadStatus("❌ Clear failed: network error.");
+      setUploadStatus("âŒ Clear failed: network error.");
     } finally {
       setClearing(false);
     }
   };
 
-  // 🔹 Upload document
+  // ðŸ”¹ Upload document
   const uploadDocument = async () => {
     if (!file || uploading) return;
 
@@ -386,21 +386,21 @@ export default function Home() {
         setFile(null);
         const refreshedFiles = await fetchFiles();
         if (!refreshedFiles?.some((entry) => entry.document_id === documentId)) {
-          setUploadStatus("❌ Upload completed, but the document did not appear in the library. Refresh and try again.");
+          setUploadStatus("âŒ Upload completed, but the document did not appear in the library. Refresh and try again.");
           return;
         }
         setSelectedDocumentIds((previous) => previous.includes(documentId) ? previous : [...previous, documentId]);
         setUploadStatus(uploadResult.status === "duplicate"
-          ? "✅ This document is already in your library."
-          : "✅ Document uploaded and indexed successfully.");
+          ? "âœ… This document is already in your library."
+          : "âœ… Document uploaded and indexed successfully.");
         return;
       }
 
       const message = getErrorMessage(data, "Upload failed.");
-      setUploadStatus(`❌ ${message}`);
+      setUploadStatus(`âŒ ${message}`);
     } catch (error) {
       console.error(error);
-      setUploadStatus("❌ Upload failed: network error. Please try again.");
+      setUploadStatus("âŒ Upload failed: network error. Please try again.");
     } finally {
       setUploading(false);
     }
@@ -411,14 +411,14 @@ export default function Home() {
       <div className="max-w-5xl mx-auto">
         <header className="mb-10 text-center md:text-left">
           <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-gray-900 mb-3">
-            Smart Research Assistant <span className="text-blue-600">🚀</span>
+            Smart Research Assistant <span className="text-blue-600">ðŸš€</span>
           </h1>
           <p className="text-gray-500 text-lg md:text-xl max-w-2xl">Upload your documents and ask intelligent questions to instantly extract insights.</p>
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-1 space-y-6">
-            {/* 🔹 Upload Section */}
+            {/* ðŸ”¹ Upload Section */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
                 <Database className="w-5 h-5 mr-2 text-blue-500" />
@@ -437,7 +437,7 @@ export default function Home() {
 
                       if (!validation.valid) {
                         setFile(null);
-                        setUploadStatus(`❌ ${validation.message}`);
+                        setUploadStatus(`âŒ ${validation.message}`);
                         e.target.value = "";
                         return;
                       }
@@ -470,14 +470,14 @@ export default function Home() {
               </button>
 
                 {uploadStatus && (
-                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') || uploadStatus.includes('✅') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') || uploadStatus.includes('❌') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
-                    { (uploadStatus.includes('success') || uploadStatus.includes('✅')) && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
+                  <div className={`mt-4 text-sm font-medium p-3 rounded-xl flex items-center ${uploadStatus.includes('success') || uploadStatus.includes('âœ…') ? 'bg-green-50 text-green-700 border border-green-100' : uploadStatus.includes('Error') || uploadStatus.includes('failed') || uploadStatus.includes('âŒ') ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                    { (uploadStatus.includes('success') || uploadStatus.includes('âœ…')) && <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
                     {uploadStatus}
                   </div>
                 )}
               </div>
 
-              {/* 🔹 Document Library */}
+              {/* ðŸ”¹ Document Library */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
                 <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
                   <Library className="w-5 h-5 mr-2 text-green-500" />
@@ -494,10 +494,10 @@ export default function Home() {
                           <input
                             type="checkbox"
                             checked={Boolean(f.document_id) && selectedDocumentIds.includes(f.document_id ?? "")}
-                            disabled={!f.document_id || (f.status ?? 'completed') !== 'completed'}
+                            disabled={!f.document_id || (f.status ?? 'pending') !== 'completed'}
                             onChange={() => {
                               if (!f.document_id) return;
-                              if ((f.status ?? 'completed') !== 'completed') return;
+                              if ((f.status ?? 'pending') !== 'completed') return;
                               setSelectedDocumentIds((prev) => {
                                 if (prev.includes(f.document_id ?? "")) {
                                   return prev.filter((id) => id !== f.document_id);
@@ -509,7 +509,7 @@ export default function Home() {
                           />
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-gray-700 truncate" title={f.name}>{f.name}</p>
-                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} • {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
+                            <p className="text-xs text-gray-400">{formatFileSize(f.size)} â€¢ {new Date(f.uploaded_at * 1000).toLocaleDateString()}</p>
                             <div className="mt-1">
                               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
                                 f.status === 'completed' ? 'bg-green-100 text-green-700' :
@@ -524,7 +524,7 @@ export default function Home() {
                           </div>
                         </label>
                         <button 
-                          onClick={() => deleteFile(f.name)}
+                          onClick={() => deleteFile(f)}
                           className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
                           title="Delete document"
                         >
@@ -539,7 +539,7 @@ export default function Home() {
 
           <div className="lg:col-span-2 space-y-6">
 
-            {/* 🔹 Chat Section */}
+            {/* ðŸ”¹ Chat Section */}
             <div id="chat-container" className="space-y-6 max-h-[600px] overflow-y-auto pr-2 scroll-smooth">
               {messages.length > 0 && (
                 <div className="flex justify-end gap-2 mb-4">
@@ -614,7 +614,7 @@ export default function Home() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* 🔹 Question Section (Relocated) */}
+            {/* ðŸ”¹ Question Section (Relocated) */}
             <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-100 transition-all hover:shadow-xl relative overflow-hidden group">
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 via-blue-500 to-purple-500 opacity-70"></div>
               

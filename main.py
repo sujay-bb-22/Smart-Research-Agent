@@ -632,7 +632,8 @@ class QueryRequest(BaseModel):
 
 
 class DeleteRequest(BaseModel):
-    filename: str
+    filename: str | None = None
+    document_id: str | None = None
 
 
 class CitationResponse(BaseModel):
@@ -769,9 +770,9 @@ def is_summary_question(question: str) -> bool:
 
 def _normalize_document_status(value):
     if value is None:
-        return "completed"
+        return "pending"
     status = str(value).strip().lower()
-    return status if status in {"pending", "processing", "completed", "failed"} else "completed"
+    return status if status in {"pending", "processing", "completed", "failed"} else "pending"
 
 
 def _get_user_workspace_context(request=None, user_id=None, workspace_id=None, default_if_missing=True):
@@ -1418,7 +1419,9 @@ async def upload_pdf(request: Request, file: UploadFile = File(None)):
             detail="Invalid file name.",
         )
 
-    file_bytes = await file.read()
+    # Cap memory use while still giving validation a byte buffer for the
+    # supported PDF/DOCX formats.
+    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
     if not file_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1585,18 +1588,26 @@ def get_document_status(document_id: str, request: Request):
 def delete_file(payload: DeleteRequest, http_request: Request):
     global db
 
-    if not payload.filename:
+    if not payload.filename and not payload.document_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing filename.",
+            detail="Missing document_id or filename.",
         )
 
     user_id, workspace_id = _get_user_workspace_context(http_request)
-    record = _find_document_record_by_filename(payload.filename, user_id=user_id, workspace_id=workspace_id)
+    registry = _load_document_registry()
+    record = None
+    if payload.document_id:
+        candidate = registry.get(payload.document_id)
+        if candidate and candidate.get("user_id") in {None, user_id} and candidate.get("workspace_id") in {None, workspace_id}:
+            record = candidate
+    elif payload.filename:
+        record = _find_document_record_by_filename(payload.filename, user_id=user_id, workspace_id=workspace_id)
+    filename = payload.filename or (record or {}).get("filename") or payload.document_id
     file_path = None
     if record is not None:
         file_path = record.get("path")
-    elif not _load_document_registry():
+    elif not registry and payload.filename:
         # Pre-registry installs stored files under their display names. Keep this
         # migration path tightly constrained to a sanitized, supported filename.
         safe_filename = sanitize_filename(payload.filename)
@@ -1606,7 +1617,7 @@ def delete_file(payload: DeleteRequest, http_request: Request):
     if file_path is None or not os.path.exists(file_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document '{payload.filename}' not found.",
+            detail=f"Document '{filename}' not found.",
         )
 
     try:
@@ -1630,11 +1641,11 @@ def delete_file(payload: DeleteRequest, http_request: Request):
             user_id,
             workspace_id,
         )
-        return {"message": f"Successfully deleted {payload.filename}"}
+        return {"message": f"Successfully deleted {filename}"}
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unable to delete '{payload.filename}'.",
+            detail=f"Unable to delete '{filename}'.",
         ) from exc
     except Exception as exc:
         raise HTTPException(

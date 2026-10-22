@@ -1,4 +1,7 @@
 import hashlib
+from types import SimpleNamespace
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -62,6 +65,41 @@ def test_top_k_and_threshold_validation():
     assert main.validate_top_k(0) == main.DEFAULT_TOP_K
     assert main.validate_top_k(999) == main.MAX_TOP_K
     assert main.validate_relevance_threshold(-1.0) == main.RELEVANCE_THRESHOLD
+
+
+def test_unknown_document_status_is_not_reported_as_completed():
+    assert main._normalize_document_status(None) == "pending"
+    assert main._normalize_document_status("unexpected") == "pending"
+    assert main._normalize_document_status("completed") == "completed"
+
+
+def test_prepare_documents_normalizes_before_filtering_and_rejects_empty_chunks():
+    from langchain_core.documents import Document
+
+    prepared = main._prepare_documents_for_indexing(
+        [SimpleNamespace(page_content=" readable content ", metadata={"page": "2"})],
+        "doc-normalized",
+        "report.pdf",
+        "user-a",
+        "workspace-a",
+    )
+    assert len(prepared) == 1
+    assert isinstance(prepared[0], Document)
+    assert prepared[0].metadata["page"] == 2
+    assert prepared[0].metadata["document_id"] == "doc-normalized"
+    assert prepared[0].metadata["filename"] == "report.pdf"
+    assert prepared[0].metadata["chunk_id"] == "doc-normalized-chunk-001"
+    assert prepared[0].metadata["user_id"] == "user-a"
+    assert prepared[0].metadata["workspace_id"] == "workspace-a"
+
+    with pytest.raises(main.DocumentParsingError):
+        main._prepare_documents_for_indexing(
+            [SimpleNamespace(page_content="  ", metadata={})],
+            "doc-empty",
+            "empty.pdf",
+            "user-a",
+            "workspace-a",
+        )
 
 
 def test_error_response_shape():
