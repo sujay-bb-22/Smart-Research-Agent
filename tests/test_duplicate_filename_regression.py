@@ -17,6 +17,7 @@ def test_duplicate_filename_uploads_keep_distinct_storage_and_document_ids(monke
     main.db = None
     main.retriever = None
     main.embeddings = None
+    monkeypatch.setattr(main, "embeddings", type("FakeEmbeddings", (), {"embed_documents": lambda self, texts: [[0.1, 0.2, 0.3] for _ in texts]})())
 
     def fake_get_pdf_chunks(path, document_id=None, filename=None):
         if "A" in path:

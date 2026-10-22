@@ -10,10 +10,18 @@ def test_upload_records_user_and_workspace(monkeypatch):
         def add_documents(self, documents):
             self.documents = documents
 
+        def add_embeddings(self, texts, embeddings, metadatas=None, ids=None):
+            self.documents = list(zip(texts, metadatas or []))
+
+    class FakeEmbeddings:
+        def embed_documents(self, texts):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
     monkeypatch.setattr(main.settings, "auth_required", False)
     monkeypatch.setattr(main, "load_db", lambda: None)
     monkeypatch.setattr(main, "db", FakeDB())
     monkeypatch.setattr(main, "retriever", object())
+    monkeypatch.setattr(main, "embeddings", FakeEmbeddings())
     monkeypatch.setattr(
         main,
         "_call_ingestion_with_metadata",
@@ -51,7 +59,7 @@ def test_upload_library_and_chat_share_default_document_scope(monkeypatch, tmp_p
     monkeypatch.setattr(main, "load_db", lambda: None)
     monkeypatch.setattr(main, "db", fake_db)
     monkeypatch.setattr(main, "retriever", object())
-    monkeypatch.setattr(main, "embeddings", object())
+    monkeypatch.setattr(main, "embeddings", type("FakeEmbeddings", (), {"embed_documents": lambda self, texts: [[0.1, 0.2, 0.3] for _ in texts]})())
     monkeypatch.setattr(main, "llm", FakeLLM())
     monkeypatch.setattr(main, "lexical_index", main.LexicalIndex())
     monkeypatch.setattr(

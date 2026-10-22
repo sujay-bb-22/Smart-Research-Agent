@@ -1,4 +1,5 @@
 import io
+import hashlib
 import os
 import uuid
 import zipfile
@@ -38,6 +39,29 @@ class UnsupportedDocumentError(ValueError, IngestionError):
 
 class DocumentParsingError(IngestionError):
     """Raised when a supported document cannot be parsed or read."""
+
+
+class OCRUnavailableError(DocumentParsingError):
+    """Raised when a scanned document needs OCR but Tesseract is unavailable."""
+
+
+def _ocr_image(image_bytes: bytes) -> str:
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError as exc:
+        raise OCRUnavailableError(
+            "This scanned document needs OCR. OCR support is unavailable on the server."
+        ) from exc
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            return pytesseract.image_to_string(image, lang=os.getenv("OCR_LANGUAGE", "eng")).strip()
+    except pytesseract.TesseractNotFoundError as exc:
+        raise OCRUnavailableError(
+            "This scanned document needs OCR. The OCR engine is unavailable on the server."
+        ) from exc
+    except Exception as exc:
+        raise DocumentParsingError("Unable to read an embedded document image.") from exc
 
 
 def _is_valid_pdf_bytes(file_bytes: bytes | bytearray) -> bool:
@@ -126,15 +150,83 @@ def load_docx_documents(docx_path: str):
         if paragraph_text:
             paragraphs.append(paragraph_text)
 
-    if not paragraphs:
-        raise DocumentParsingError("No readable content found in DOCX file")
-
-    return [
-        Document(
+    results = []
+    if paragraphs:
+        results.append(Document(
             page_content="\n".join(paragraphs),
             metadata={"source": docx_path, "location": "section-1"},
-        )
-    ]
+        ))
+
+    seen_images = set()
+    image_index = 0
+    try:
+        with zipfile.ZipFile(docx_path) as archive:
+            for name in sorted(archive.namelist()):
+                if not name.startswith("word/media/"):
+                    continue
+                payload = archive.read(name)
+                digest = hashlib.sha256(payload).hexdigest()
+                if digest in seen_images:
+                    continue
+                seen_images.add(digest)
+                image_index += 1
+                try:
+                    text = _ocr_image(payload)
+                except OCRUnavailableError:
+                    if paragraphs:
+                        continue
+                    raise
+                except DocumentParsingError:
+                    if paragraphs:
+                        continue
+                    raise
+                if text and not any(text in existing for existing in paragraphs):
+                    results.append(Document(
+                        page_content=text,
+                        metadata={"source": docx_path, "location": f"embedded-image-{image_index}"},
+                    ))
+    except (zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise DocumentParsingError("Unable to read DOCX file.") from exc
+
+    if not results:
+        raise DocumentParsingError("No readable content found in DOCX file")
+    return results
+
+
+def _load_pdf_with_ocr(pdf_path: str):
+    documents = PyMuPDFLoader(pdf_path).load()
+    if not os.path.isfile(pdf_path):
+        return documents
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        return documents
+    try:
+        with fitz.open(pdf_path) as pdf:
+            for index, page in enumerate(pdf):
+                if index >= len(documents):
+                    continue
+                native_text = (documents[index].page_content or "").strip()
+                if len(native_text) >= 40 or not page.get_images(full=True):
+                    continue
+                try:
+                    text_page = page.get_textpage_ocr(language=os.getenv("OCR_LANGUAGE", "eng"), dpi=250, full=False)
+                except Exception as exc:
+                    if "tesseract" in str(exc).lower() or "ocr" in str(exc).lower():
+                        if any((doc.page_content or "").strip() for doc in documents):
+                            continue
+                        raise OCRUnavailableError(
+                            "This scanned PDF needs OCR. The OCR engine is unavailable on the server."
+                        ) from exc
+                    raise DocumentParsingError("Unable to run OCR on a scanned PDF page.") from exc
+                ocr_text = page.get_text(textpage=text_page).strip()
+                if ocr_text:
+                    documents[index].page_content = ocr_text
+    except IngestionError:
+        raise
+    except Exception as exc:
+        raise DocumentParsingError("Unable to read the uploaded PDF.") from exc
+    return documents
 
 
 def get_pdf_chunks(pdf_path, document_id=None, filename=None):
@@ -146,8 +238,7 @@ def get_pdf_chunks(pdf_path, document_id=None, filename=None):
 
     try:
         if file_type == "pdf":
-            loader = PyMuPDFLoader(pdf_path)
-            documents = loader.load()
+            documents = _load_pdf_with_ocr(pdf_path)
             page_count = len(documents)
         elif file_type == "docx":
             documents = load_docx_documents(pdf_path)

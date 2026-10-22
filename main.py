@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
-from langchain_core.embeddings import FakeEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
@@ -1044,13 +1043,10 @@ def _active_embedding_config(embedding_function=None):
         provider = "google"
         model = settings.google_embedding_model
     else:
-        provider = "fake"
-        model = "FakeEmbeddings"
+        provider = "unconfigured"
+        model = None
 
     dimension = _embedding_dimension_from_object(embedding_function)
-    if provider == "fake" and dimension is None:
-        dimension = 384
-
     return {
         "provider": provider,
         "model": model,
@@ -1183,12 +1179,41 @@ def _reset_persisted_vector_store(path: str):
 
 def _build_embedding_function():
     google_api_key = os.getenv("GOOGLE_API_KEY")
-    if google_api_key:
-        kwargs = {"model": settings.google_embedding_model}
-        if settings.embedding_dimension:
-            kwargs["output_dimensionality"] = settings.embedding_dimension
-        return GoogleGenerativeAIEmbeddings(**kwargs)
-    return FakeEmbeddings(size=settings.embedding_dimension or 384)
+    if not google_api_key:
+        raise RuntimeError("GOOGLE_API_KEY is required to index documents.")
+    kwargs = {"model": settings.google_embedding_model}
+    if settings.embedding_dimension:
+        kwargs["output_dimensionality"] = settings.embedding_dimension
+    return GoogleGenerativeAIEmbeddings(**kwargs)
+
+
+def _validated_embedding_vectors(texts, embedding_function):
+    if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
+        raise DocumentParsingError("Cannot generate embeddings for empty document chunks.")
+    try:
+        vectors = embedding_function.embed_documents(texts)
+    except Exception as exc:
+        logger.exception("document_embedding_failed chunks=%s", len(texts))
+        raise RuntimeError("Document embedding generation failed.") from exc
+    if not isinstance(vectors, (list, tuple)) or len(vectors) != len(texts):
+        raise RuntimeError("Embedding service returned an invalid response.")
+    expected_dimension = settings.embedding_dimension
+    validated = []
+    for vector in vectors:
+        if not isinstance(vector, (list, tuple)) or not vector:
+            raise RuntimeError("Embedding service returned an invalid response.")
+        if expected_dimension and len(vector) != expected_dimension:
+            raise RuntimeError("Embedding service returned an incompatible vector dimension.")
+        try:
+            numeric = [float(value) for value in vector]
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("Embedding service returned an invalid response.") from exc
+        if not all(math.isfinite(value) for value in numeric):
+            raise RuntimeError("Embedding service returned an invalid response.")
+        if validated and len(numeric) != len(validated[0]):
+            raise RuntimeError("Embedding service returned inconsistent vector dimensions.")
+        validated.append(numeric)
+    return validated
 
 
 def load_db():
@@ -1304,10 +1329,18 @@ def index_document_chunks(normalized_docs, document_id: str, request_id: str | N
         if embeddings is None or db is None:
             load_db()
 
+        texts = [doc.page_content for doc in normalized_docs]
+        vectors = _validated_embedding_vectors(texts, embeddings)
+
         expected_config = _active_embedding_config(embeddings)
         ensure_vector_store_compatible(settings.vector_store_path, expected_config, allow_reset=False)
 
-        if db is None:
+        if hasattr(db, "add_embeddings"):
+            metadatas = [dict(doc.metadata or {}) for doc in normalized_docs]
+            ids = [str(meta.get("chunk_id") or f"{document_id}-chunk-{index:03d}")
+                   for index, meta in enumerate(metadatas, start=1)]
+            db.add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas, ids=ids)
+        elif db is None:
             db = Chroma.from_documents(
                 normalized_docs,
                 embeddings,

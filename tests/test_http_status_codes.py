@@ -19,6 +19,9 @@ class FakeDB:
     def add_documents(self, documents):
         return None
 
+    def add_embeddings(self, texts, embeddings, metadatas=None, ids=None):
+        return None
+
     def delete(self, where=None):
         return None
 
@@ -39,6 +42,11 @@ class FakeRetriever:
 class FakeLLM:
     async def astream(self, prompt):
         yield SimpleNamespace(content="Answer from the document.\nSUGGESTIONS: [\"Follow-up question 1\", \"Follow-up question 2\", \"Follow-up question 3\"]")
+
+
+class FakeEmbeddings:
+    def embed_documents(self, texts):
+        return [[0.1, 0.2, 0.3] for _ in texts]
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +93,7 @@ def test_upload_invalid_mime_type_returns_400():
 
 def test_upload_success_returns_200(monkeypatch):
     def fake_load_db():
-        main.embeddings = object()
+        main.embeddings = FakeEmbeddings()
         main.db = FakeDB()
         main.retriever = FakeRetriever()
 

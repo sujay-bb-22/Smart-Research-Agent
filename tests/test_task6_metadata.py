@@ -102,6 +102,7 @@ def test_upload_flow_puts_metadata_on_every_chunk(monkeypatch):
             self.documents = documents
 
     db = FakeDB()
+    monkeypatch.setattr(main, "embeddings", type("FakeEmbeddings", (), {"embed_documents": lambda self, texts: [[0.1, 0.2, 0.3] for _ in texts]})())
     monkeypatch.setattr(main, "load_db", lambda: None)
     monkeypatch.setattr(main, "db", db)
     monkeypatch.setattr(main, "retriever", object())
