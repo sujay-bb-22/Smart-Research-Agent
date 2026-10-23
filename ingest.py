@@ -256,22 +256,42 @@ def _load_pdf_with_ocr(pdf_path: str):
             if page_count > settings.max_document_pages:
                 raise DocumentParsingError("This document exceeds the maximum supported page count.")
             pages = list(pdf)
-            documents = [
-                Document(
-                    page_content=page.get_text("text") or "",
+            documents = []
+            for index, page in enumerate(pages):
+                try:
+                    native_text = page.get_text("text") or ""
+                except Exception as exc:
+                    native_text = ""
+                    logger.warning("pdf_page_text_extraction_failed page=%s error_type=%s", index + 1, type(exc).__name__)
+                documents.append(Document(
+                    page_content=native_text,
                     metadata={"source": pdf_path, "page": index, "page_count": page_count},
-                )
-                for index, page in enumerate(pages)
-            ]
-            has_native_text = any(len((doc.page_content or "").strip()) >= 40 for doc in documents)
+                ))
+
             ocr_document_started = time.perf_counter()
+            ocr_attempted = 0
+            ocr_failed_pages = 0
+            ocr_unavailable = False
+            ocr_page_error = False
             for index, page in enumerate(pages):
                 native_text = (documents[index].page_content or "").strip()
-                if len(native_text) >= 40 or not page.get_images(full=True):
+                if len(native_text) >= 40:
+                    continue
+                try:
+                    visual_content = bool(page.get_images(full=True)) or bool(page.get_drawings())
+                    if not visual_content:
+                        visual_content = bool(page.get_text("dict").get("blocks"))
+                except Exception as exc:
+                    visual_content = True
+                    logger.warning("pdf_page_visual_detection_failed page=%s error_type=%s", index + 1, type(exc).__name__)
+                if not visual_content:
                     continue
                 if time.perf_counter() - ocr_document_started >= settings.ocr_total_timeout_seconds:
-                    raise DocumentParsingError("OCR processing exceeded the document time limit.")
+                    ocr_failed_pages += 1
+                    logger.warning("pdf_ocr_page_skipped page=%s reason=document_timeout", index + 1)
+                    continue
                 ocr_started = time.perf_counter()
+                ocr_attempted += 1
                 try:
                     rect = page.rect
                     area = max(float(rect.width) * float(rect.height), 1.0)
@@ -281,19 +301,34 @@ def _load_pdf_with_ocr(pdf_path: str):
                     dpi = min(200, dpi)
                     rendered_page = page.get_pixmap(dpi=dpi, alpha=False).tobytes("png")
                     ocr_text = _ocr_image(rendered_page)
-                except OCRUnavailableError:
-                    if has_native_text:
-                        continue
-                    raise OCRUnavailableError(
-                        "This scanned PDF needs OCR. The OCR engine is unavailable on the server."
-                    )
-                except DocumentParsingError:
-                    if has_native_text:
-                        continue
-                    raise
+                except OCRUnavailableError as exc:
+                    ocr_unavailable = True
+                    ocr_page_error = True
+                    ocr_failed_pages += 1
+                    logger.warning("pdf_ocr_page_failed page=%s error_type=%s duration_ms=%.1f", index + 1, type(exc).__name__, (time.perf_counter() - ocr_started) * 1000)
+                    continue
+                except Exception as exc:
+                    ocr_page_error = True
+                    ocr_failed_pages += 1
+                    logger.warning("pdf_ocr_page_failed page=%s error_type=%s duration_ms=%.1f", index + 1, type(exc).__name__, (time.perf_counter() - ocr_started) * 1000)
+                    continue
                 logger.info("ocr_pdf_page_completed page=%s duration_ms=%.1f", index + 1, (time.perf_counter() - ocr_started) * 1000)
                 if ocr_text:
-                    documents[index].page_content = ocr_text
+                    native_key = "".join(ch.lower() for ch in native_text if ch.isalnum())
+                    ocr_key = "".join(ch.lower() for ch in ocr_text if ch.isalnum())
+                    if native_key and native_key in ocr_key:
+                        documents[index].page_content = ocr_text
+                    elif ocr_key and ocr_key in native_key:
+                        documents[index].page_content = native_text
+                    else:
+                        documents[index].page_content = "\n".join(part for part in (native_text, ocr_text.strip()) if part)
+            readable_pages = sum(bool((doc.page_content or "").strip()) for doc in documents)
+            logger.info("pdf_extraction_summary pages=%s readable_pages=%s ocr_pages=%s failed_ocr_pages=%s", page_count, readable_pages, ocr_attempted, ocr_failed_pages)
+            if not any((doc.page_content or "").strip() for doc in documents):
+                if ocr_unavailable:
+                    raise OCRUnavailableError("This scanned PDF needs OCR, but the OCR engine or language data is unavailable on the server.")
+                if ocr_page_error:
+                    raise DocumentParsingError("OCR failed on every page that needed recognition.")
     except IngestionError:
         raise
     except Exception as exc:

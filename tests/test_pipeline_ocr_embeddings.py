@@ -81,6 +81,87 @@ def test_text_pdf_does_not_open_ocr_renderer(monkeypatch, tmp_path):
     assert docs[0].page_content == "A" * 100
 
 
+def test_mixed_pdf_keeps_native_text_and_ocr_only_sparse_visual_pages(monkeypatch, tmp_path):
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(b"placeholder")
+
+    class Page:
+        rect = SimpleNamespace(width=612, height=792)
+        def __init__(self, text, images=()): self.text, self.images = text, images
+        def get_text(self, mode="text"):
+            if mode == "dict": return {"blocks": []}
+            return self.text
+        def get_images(self, full=True): return self.images
+        def get_drawings(self): return []
+        def get_pixmap(self, **kwargs): return SimpleNamespace(tobytes=lambda _: b"rendered")
+
+    class Pdf:
+        def __enter__(self): return [Page("Native readable text " * 10), Page("Figure 1", [(1,)])]
+        def __exit__(self, *args): return False
+
+    import pymupdf
+    monkeypatch.setattr(pymupdf, "open", lambda _: Pdf())
+    calls = []
+    monkeypatch.setattr(ingest, "_ocr_image", lambda _: calls.append(True) or "OCR text in figure")
+
+    docs = ingest._load_pdf_with_ocr(str(path))
+
+    assert len(calls) == 1
+    assert "Native readable text" in docs[0].page_content
+    assert "Figure 1" in docs[1].page_content
+    assert "OCR text in figure" in docs[1].page_content
+    assert docs[1].metadata["page"] == 1
+
+
+def test_pdf_continues_after_one_page_text_extraction_error(monkeypatch, tmp_path):
+    path = tmp_path / "partially-broken.pdf"
+    path.write_bytes(b"placeholder")
+
+    class Page:
+        rect = SimpleNamespace(width=612, height=792)
+        def __init__(self, number): self.number = number
+        def get_text(self, mode="text"):
+            if self.number == 0: raise RuntimeError("bad page")
+            return "Readable page content " * 4
+        def get_images(self, full=True): return []
+        def get_drawings(self): return []
+
+    class Pdf:
+        def __enter__(self): return [Page(0), Page(1)]
+        def __exit__(self, *args): return False
+
+    import pymupdf
+    monkeypatch.setattr(pymupdf, "open", lambda _: Pdf())
+    docs = ingest._load_pdf_with_ocr(str(path))
+    assert docs[0].page_content == ""
+    assert "Readable page content" in docs[1].page_content
+    assert docs[0].metadata["page"] == 0
+
+
+def test_pdf_ocr_failure_on_one_page_keeps_readable_native_pages(monkeypatch, tmp_path):
+    path = tmp_path / "partial.pdf"
+    path.write_bytes(b"placeholder")
+
+    class Page:
+        rect = SimpleNamespace(width=612, height=792)
+        def __init__(self, text, images=()): self.text, self.images = text, images
+        def get_text(self, mode="text"): return self.text
+        def get_images(self, full=True): return self.images
+        def get_drawings(self): return []
+        def get_pixmap(self, **kwargs): return SimpleNamespace(tobytes=lambda _: b"rendered")
+
+    class Pdf:
+        def __enter__(self): return [Page("Native page has enough readable text " * 3), Page("", [(1,)])]
+        def __exit__(self, *args): return False
+
+    import pymupdf
+    monkeypatch.setattr(pymupdf, "open", lambda _: Pdf())
+    monkeypatch.setattr(ingest, "_ocr_image", lambda _: (_ for _ in ()).throw(ingest.DocumentParsingError("engine failure")))
+    docs = ingest._load_pdf_with_ocr(str(path))
+    assert "Native page has enough readable text" in docs[0].page_content
+    assert docs[1].page_content == ""
+
+
 def test_ocr_availability_requires_executable_and_language(monkeypatch):
     import pytesseract
     monkeypatch.setattr(ingest.shutil, "which", lambda name: "/usr/bin/tesseract")
@@ -203,6 +284,19 @@ def test_ocr_failure_marks_document_failed(monkeypatch, tmp_path):
     record = main._load_document_registry()[document_id]
     assert record["status"] == "failed"
     assert "OCR" in record["error"]
+
+
+def test_embedding_failure_is_reported_clearly_and_marks_document_failed(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    document_id = "embedding-failed-doc"
+    main._register_document(document_id, "notes.pdf", "data/notes.pdf", status="pending")
+    monkeypatch.setattr(main, "_call_ingestion_with_metadata", lambda *args: [main.Document(page_content="Readable content", metadata={"page": 1})])
+    monkeypatch.setattr(main, "index_document_chunks", lambda *args, **kwargs: (_ for _ in ()).throw(main.EmbeddingGenerationError("failed")))
+    main._process_document_upload(document_id, "data/notes.pdf", "notes.pdf", "u", "w")
+    record = main._load_document_registry()[document_id]
+    assert record["status"] == "failed"
+    assert "Gemini" in record["error"]
 
 
 class ValidEmbedding:

@@ -13,8 +13,7 @@ export async function POST(req: Request) {
         });
 
         const text = await res.text();
-
-        // 🔥 Try parse JSON safely
+        // Parse the backend response safely.
         try {
             const data = JSON.parse(text);
             if (!res.ok) return Response.json(data, { status: res.status });

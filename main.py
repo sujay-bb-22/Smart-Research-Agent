@@ -544,6 +544,18 @@ After your answer, provide 3 suggested follow-up questions in this EXACT format:
 db = None
 retriever = None
 embeddings = None
+
+
+class EmbeddingGenerationError(RuntimeError):
+    """Raised when a document's Gemini vectors cannot be generated safely."""
+
+
+class VectorInsertionError(RuntimeError):
+    """Raised when ChromaDB cannot confirm the document vectors were stored."""
+
+
+class VectorStoreInitializationError(RuntimeError):
+    """Raised when the existing vector store cannot be initialized safely."""
 llm = None
 RATE_LIMIT_BUCKETS = {}
 VECTOR_STORE_LOCK = threading.RLock()
@@ -1282,28 +1294,28 @@ def _validated_embedding_vectors(texts, embedding_function):
                 "document_embedding_failed batch=%s batches=%s chunks=%s error_type=%s",
                 batch_index, batch_count, len(texts), type(exc).__name__,
             )
-            raise RuntimeError("Document embedding generation failed.") from exc
+            raise EmbeddingGenerationError("Gemini could not generate document embeddings.") from exc
         if not isinstance(batch_vectors, (list, tuple)) or len(batch_vectors) != len(batch_texts):
-            raise RuntimeError("Embedding service returned an invalid response.")
+            raise EmbeddingGenerationError("Gemini returned an invalid embedding response.")
         vectors.extend(batch_vectors)
     embedding_duration_ms = (time.perf_counter() - embedding_started) * 1000
     if not isinstance(vectors, (list, tuple)) or len(vectors) != len(texts):
-        raise RuntimeError("Embedding service returned an invalid response.")
+        raise EmbeddingGenerationError("Gemini returned an invalid embedding response.")
     expected_dimension = settings.embedding_dimension
     validated = []
     for vector in vectors:
         if not isinstance(vector, (list, tuple)) or not vector:
-            raise RuntimeError("Embedding service returned an invalid response.")
+            raise EmbeddingGenerationError("Gemini returned an invalid embedding response.")
         if expected_dimension and len(vector) != expected_dimension:
-            raise RuntimeError("Embedding service returned an incompatible vector dimension.")
+            raise EmbeddingGenerationError("Gemini returned an incompatible embedding dimension.")
         try:
             numeric = [float(value) for value in vector]
         except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("Embedding service returned an invalid response.") from exc
+            raise EmbeddingGenerationError("Gemini returned an invalid embedding response.") from exc
         if not all(math.isfinite(value) for value in numeric):
-            raise RuntimeError("Embedding service returned an invalid response.")
+            raise EmbeddingGenerationError("Gemini returned a non-finite embedding value.")
         if validated and len(numeric) != len(validated[0]):
-            raise RuntimeError("Embedding service returned inconsistent vector dimensions.")
+            raise EmbeddingGenerationError("Gemini returned inconsistent embedding dimensions.")
         validated.append(numeric)
     logger.info(
         "document_embeddings_generated chunks=%s batches=%s duration_ms=%.1f",
@@ -1340,7 +1352,7 @@ def load_db():
     except Exception as exc:
         db = None
         retriever = None
-        raise RuntimeError(f"Database initialization failed: {exc}") from exc
+        raise VectorStoreInitializationError("The existing search index could not be initialized.") from exc
 
 
 @app.get("/")
@@ -1443,15 +1455,19 @@ def index_document_chunks(normalized_docs, document_id: str, request_id: str | N
             db = Chroma(persist_directory=settings.vector_store_path, embedding_function=embeddings)
             retriever = db.as_retriever(search_kwargs={"k": settings.default_k})
             db.documents = []
-        if callable(getattr(db, "add_embeddings", None)):
-            db.add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas, ids=ids)
-        elif isinstance(db, Chroma):
-            # The installed langchain-community Chroma wrapper lacks
-            # add_embeddings; write validated vectors directly to its collection
-            # to avoid invoking the embedding provider a second time.
-            db._collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
-        else:
-            db.add_documents(normalized_docs)
+        try:
+            if callable(getattr(db, "add_embeddings", None)):
+                db.add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas, ids=ids)
+            elif isinstance(db, Chroma):
+                # The installed langchain-community Chroma wrapper lacks
+                # add_embeddings; write validated vectors directly to its collection
+                # to avoid invoking the embedding provider a second time.
+                db._collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+            else:
+                db.add_documents(normalized_docs)
+        except Exception as exc:
+            logger.exception("document_vector_insertion_failed document_id=%s chunks=%s error_type=%s", document_id, len(texts), type(exc).__name__)
+            raise VectorInsertionError("ChromaDB could not store the document vectors.") from exc
 
         if isinstance(db, Chroma):
             prior_documents = list(getattr(db, "documents", []))
@@ -1511,8 +1527,10 @@ def _rollback_document_index(document_id: str):
 def _process_document_upload(document_id: str, file_path: str, filename: str, user_id: str, workspace_id: str, request_id: str | None = None):
     processing_started = time.perf_counter()
     indexing_started = False
+    processing_stage = "status_update"
     try:
         _update_document_registry_entry(document_id, status="processing", error=None, processing_started_at=time.time())
+        processing_stage = "extraction"
         extraction_started = time.perf_counter()
         docs = _call_ingestion_with_metadata(file_path, document_id, filename)
         logger.info(
@@ -1522,6 +1540,7 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
             len(docs or []),
             (time.perf_counter() - extraction_started) * 1000,
         )
+        processing_stage = "chunking"
         chunk_started = time.perf_counter()
         normalized_docs = _prepare_documents_for_indexing(docs, document_id, filename, user_id, workspace_id)
         logger.info(
@@ -1530,7 +1549,9 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
         )
         page_count = _extract_page_count(normalized_docs)
         indexing_started = True
+        processing_stage = "indexing"
         index_document_chunks(normalized_docs, document_id, request_id=request_id, require_registered=True)
+        processing_stage = "completion_status"
         _update_document_registry_entry(
             document_id,
             status="completed",
@@ -1548,12 +1569,11 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
         if indexing_started:
             _rollback_document_index(document_id)
         logger.exception(
-            "document_processing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
+            "document_processing_failed request_id=%s document_id=%s stage=%s error_type=%s",
             request_id,
             document_id,
-            filename,
-            user_id,
-            workspace_id,
+            processing_stage,
+            type(exc).__name__,
         )
         if isinstance(exc, OCRUnavailableError):
             public_error = "This document contains scanned pages, but OCR is currently unavailable."
@@ -1569,15 +1589,27 @@ def _process_document_upload(document_id: str, file_path: str, filename: str, us
         if indexing_started:
             _rollback_document_index(document_id)
         logger.exception(
-            "document_indexing_failed request_id=%s document_id=%s filename=%s user_id=%s workspace_id=%s",
+            "document_processing_failed request_id=%s document_id=%s stage=%s error_type=%s",
             request_id,
             document_id,
-            filename,
-            user_id,
-            workspace_id,
+            processing_stage,
+            type(exc).__name__,
         )
-        if "embedding" in str(exc).lower():
-            public_error = "The document could not be indexed because text processing failed. Please try again later."
+        if isinstance(exc, EmbeddingGenerationError):
+            cause = exc.__cause__
+            cause_name = type(cause).__name__.lower() if cause else ""
+            cause_status = getattr(cause, "status_code", None) or getattr(cause, "code", None)
+            cause_hint = str(cause).lower() if cause else ""
+            if cause_status == 429 or "quota" in cause_name or "resourceexhausted" in cause_name or "quota" in cause_hint:
+                public_error = "Gemini's embedding quota is temporarily unavailable. Please retry later."
+            elif "timeout" in cause_name or "deadline" in cause_name or "timed out" in cause_hint:
+                public_error = "Gemini's embedding service timed out. Please retry."
+            else:
+                public_error = "The document text was extracted, but Gemini could not create its search vectors. Check the embedding service and retry."
+        elif isinstance(exc, VectorInsertionError):
+            public_error = "The document text was processed, but the search index could not store it. Please retry later."
+        elif isinstance(exc, VectorStoreInitializationError):
+            public_error = "The document text was processed, but the search index could not be initialized. Please retry later."
         else:
             public_error = "The document was uploaded but could not be indexed."
         _update_document_registry_entry(document_id, status="failed", error=public_error, failed_at=time.time())

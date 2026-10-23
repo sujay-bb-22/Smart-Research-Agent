@@ -133,7 +133,7 @@ def test_upload_acknowledges_and_persists_indexing_failure(monkeypatch):
     assert response.json()["status"] == "pending"
     record = main._load_document_registry()[response.json()["document_id"]]
     assert record["status"] == "failed"
-    assert record["error"] == "The document could not be indexed because text processing failed. Please try again later."
+    assert record["error"] == "The document was uploaded but could not be indexed."
 
 
 def test_delete_missing_file_returns_404():
