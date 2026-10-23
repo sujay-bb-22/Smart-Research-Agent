@@ -30,7 +30,10 @@ class AppConfig:
     ocr_max_image_pixels: int = int(os.getenv("OCR_MAX_IMAGE_PIXELS", "12000000"))
     cors_origins: tuple[str, ...] = tuple(
         origin.strip()
-        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+        for origin in os.getenv(
+            "ALLOWED_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,https://smart-research-agent-psi.vercel.app",
+        ).split(",")
         if origin.strip()
     )
     storage_path: str = os.getenv("STORAGE_PATH", "data")

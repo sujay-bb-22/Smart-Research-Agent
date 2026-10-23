@@ -41,7 +41,10 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("smart_research_agent")
 
 MAX_UPLOAD_BYTES = settings.max_upload_size
-ALLOWED_ORIGINS = list(settings.cors_origins)
+ALLOWED_ORIGINS = list(dict.fromkeys([
+    *settings.cors_origins,
+    "https://smart-research-agent-psi.vercel.app",
+]))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

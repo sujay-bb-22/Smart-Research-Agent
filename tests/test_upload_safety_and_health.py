@@ -44,3 +44,15 @@ def test_health_and_ready_endpoints():
     assert ready.status_code in {200, 503}
     payload = ready.json()
     assert "status" in payload
+
+
+def test_cors_allows_production_frontend_upload_origin():
+    response = client.options(
+        "/upload",
+        headers={
+            "Origin": "https://smart-research-agent-psi.vercel.app",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://smart-research-agent-psi.vercel.app"

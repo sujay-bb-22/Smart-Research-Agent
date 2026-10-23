@@ -385,18 +385,23 @@ export default function Home() {
     setUploading(true);
 
     try {
-      // Send file bytes straight to the backend. A Vercel Function proxy
-      // rejects request bodies above 4.5 MB before the backend can accept them.
-      const configuredBackendUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
-      const backendUrl = configuredBackendUrl || (
-        process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : ""
-      );
-      if (!backendUrl) {
-        setUploadStatus("Upload service is not configured. Please contact the administrator.");
-        return;
+      // Keep small uploads on the same-origin proxy. Larger uploads bypass
+      // Vercel Functions, which reject request bodies above 4.5 MB.
+      const directUploadThreshold = 4 * 1024 * 1024;
+      let uploadUrl = "/api/upload";
+      if (file.size > directUploadThreshold) {
+        const configuredBackendUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+        const backendUrl = configuredBackendUrl || (
+          process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : ""
+        );
+        if (!backendUrl) {
+          setUploadStatus("Upload service is not configured. Please contact the administrator.");
+          return;
+        }
+        uploadUrl = `${backendUrl.replace(/\/$/, "")}/upload`;
       }
 
-      const res = await fetch(`${backendUrl.replace(/\/$/, "")}/upload`, {
+      const res = await fetch(uploadUrl, {
         method: "POST",
         body: formData,
       });
