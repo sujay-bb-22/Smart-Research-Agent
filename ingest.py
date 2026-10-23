@@ -2,6 +2,7 @@ import io
 import hashlib
 import logging
 import os
+import shutil
 import time
 import uuid
 import zipfile
@@ -49,6 +50,28 @@ class OCRUnavailableError(DocumentParsingError):
     """Raised when a scanned document needs OCR but Tesseract is unavailable."""
 
 
+def is_ocr_available() -> bool:
+    """Check wrapper, Tesseract executable, and configured language data safely."""
+    try:
+        import pytesseract
+        executable = shutil.which("tesseract")
+        if not executable:
+            logger.warning("ocr_unavailable reason=executable_not_found")
+            return False
+        pytesseract.pytesseract.tesseract_cmd = executable
+        languages = pytesseract.get_languages(config="")
+        language = os.getenv("OCR_LANGUAGE", "eng")
+        available = language in languages
+        if not available:
+            logger.warning("ocr_unavailable reason=language_data_missing language=%s", language)
+        if available:
+            logger.info("ocr_available executable=%s language=%s", os.path.basename(executable), language)
+        return available
+    except Exception as exc:
+        logger.warning("ocr_unavailable reason=runtime_check_failed error_type=%s", type(exc).__name__)
+        return False
+
+
 def _ocr_image(image_bytes: bytes) -> str:
     try:
         from PIL import Image
@@ -57,6 +80,10 @@ def _ocr_image(image_bytes: bytes) -> str:
         raise OCRUnavailableError(
             "This scanned document needs OCR. OCR support is unavailable on the server."
         ) from exc
+    if not is_ocr_available():
+        raise OCRUnavailableError(
+            "This scanned document needs OCR. The OCR engine or language data is unavailable on the server."
+        )
     try:
         from math import isqrt
 
