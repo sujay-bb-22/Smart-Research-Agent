@@ -5,4 +5,7 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://smart-research-agent-psi.vercel.app
     autoDeploy: true

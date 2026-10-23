@@ -385,7 +385,18 @@ export default function Home() {
     setUploading(true);
 
     try {
-      const res = await fetch("/api/upload", {
+      // Send file bytes straight to the backend. A Vercel Function proxy
+      // rejects request bodies above 4.5 MB before the backend can accept them.
+      const configuredBackendUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+      const backendUrl = configuredBackendUrl || (
+        process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : ""
+      );
+      if (!backendUrl) {
+        setUploadStatus("Upload service is not configured. Please contact the administrator.");
+        return;
+      }
+
+      const res = await fetch(`${backendUrl.replace(/\/$/, "")}/upload`, {
         method: "POST",
         body: formData,
       });
@@ -433,7 +444,7 @@ export default function Home() {
       setUploadStatus(message);
     } catch (error) {
       console.error(error);
-      setUploadStatus("Upload failed: network error. Please try again.");
+      setUploadStatus("Could not reach the upload service. Check that the backend is available and allows this site.");
     } finally {
       setUploading(false);
     }
